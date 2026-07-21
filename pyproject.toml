@@ -1,0 +1,19 @@
+[project]
+name = "alphagenome-playground"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.13.5",
+    "alphagenome-research",
+    "fastapi>=0.139.0",
+    "jax[cuda12]>=0.10.0",
+    "protobuf>=7.35.0",
+    "pydantic-settings>=2.14.2",
+    "requests>=2.33.1",
+    "uvicorn[standard]>=0.51.0",
+]
+
+[tool.uv.sources]
+alphagenome-research = { git = "https://github.com/google-deepmind/alphagenome_research.git" }
