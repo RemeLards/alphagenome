@@ -43,7 +43,7 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "server:app",
-        host=settings.host,
-        port=settings.port,
-        log_level=settings.log_level,
+        host=settings.HOST,
+        port=settings.PORT,
+        log_level=settings.LOG_LEVEL,
     )

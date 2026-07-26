@@ -15,13 +15,14 @@ class SequenceLength(IntEnum):
     MB_2 = 2 * 1024 * 1024
 
 class Settings(BaseSettings):
-    model_name: str = "all_folds"
-    sequence_len: int = SequenceLength.KB_8
-    host: str = "0.0.0.0"
-    port: int = 8000
-    log_level: str = "info"
-    device: str = "cuda:0"
-    hf_token: str = ""
+    MODEL_NAME: str = "all_folds"
+    SEQUENCE_LEN: int = SequenceLength.KB_8
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    LOG_LEVEL: str = "info"
+    DEVICE: str = "cuda:0"
+    HF_TOKEN: str = ""
+    BATCH_SIZE: int = 1
 
     model_config = SettingsConfigDict(
         env_file=".env",

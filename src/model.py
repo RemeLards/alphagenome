@@ -12,7 +12,9 @@ from src.schemas import (
 )
 from huggingface_hub import login as hf_login
 from time import time
-hf_login(settings.hf_token)
+import numpy as np
+
+hf_login(settings.HF_TOKEN)
 
 class AlphaGenomeEngine:
     def __init__(
@@ -122,6 +124,24 @@ class AlphaGenomeEngine:
             else None,
         )
 
+    @classmethod
+    def _variant_output_to_schema(
+        cls,
+        result,
+        out_types: list[dna_model.OutputType],
+    ) -> VariantOutputSchema:
+        ref_dict: dict[str, TrackDataSchema | None] = {}
+        alt_dict: dict[str, TrackDataSchema | None] = {}
+        for ot in out_types:
+            name = ot.name
+            ref_dict[name] = cls._track_to_schema(
+                getattr(result.reference, name.lower(), None)
+            )
+            alt_dict[name] = cls._track_to_schema(
+                getattr(result.alternate, name.lower(), None)
+            )
+        return VariantOutputSchema(reference=ref_dict, alternate=alt_dict)
+
     # ── public API ─────────────────────────────────────────────────────
 
     def predict_variant(
@@ -144,18 +164,140 @@ class AlphaGenomeEngine:
             requested_outputs=out_types,
         )
 
-        ref_dict: dict[str, TrackDataSchema | None] = {}
-        alt_dict: dict[str, TrackDataSchema | None] = {}
-        for ot in out_types:
-            name = ot.name
-            ref_dict[name] = self._track_to_schema(
-                getattr(result.reference, name.lower(), None)
+        return self._variant_output_to_schema(result, out_types)
+
+    def _predict_variants_chunk_vectorized(
+        self,
+        intervals: list[genome.Interval],
+        variants: list[genome.Variant],
+        ontology_terms: list[str],
+        out_types: list[dna_model.OutputType],
+    ) -> list[VariantOutputSchema]:
+        organism = dna_model.Organism.HOMO_SAPIENS
+        requested_outputs = tuple(set(out_types))
+        converted_terms = dna_model._convert_ontology_terms(ontology_terms)
+        metadata = self._model._metadata[organism]
+        track_masks = dna_model.metadata_lib.create_track_masks(
+            metadata,
+            requested_outputs=requested_outputs,
+            requested_ontologies=converted_terms,
+        )
+
+        fasta_extractor = self._model._get_fasta_extractor(organism)
+        reference_sequences: list[np.ndarray] = []
+        alternate_sequences: list[np.ndarray] = []
+        reference_gene_masks: list[np.ndarray] = []
+        splice_sites: list[np.ndarray] | None = []
+        indel_masks = []
+
+        gene_mask_extractor = self._model._gene_mask_extractors.get(organism)
+        splice_site_extractor = self._model._splice_site_extractors.get(organism)
+
+        for interval, variant in zip(intervals, variants, strict=True):
+            reference_sequence, alternate_sequence = (
+                dna_model.genome_io.extract_variant_sequences(
+                    interval, variant, fasta_extractor
+                )
             )
-            alt_dict[name] = self._track_to_schema(
-                getattr(result.alternate, name.lower(), None)
+            reference_sequences.append(
+                np.asarray(self._model._one_hot_encoder.encode(reference_sequence))
+            )
+            alternate_sequences.append(
+                np.asarray(self._model._one_hot_encoder.encode(alternate_sequence))
             )
 
-        return VariantOutputSchema(reference=ref_dict, alternate=alt_dict)
+            reference_gene_mask = np.ones((interval.width, 1), dtype=bool)
+            if gene_mask_extractor:
+                mask, _ = gene_mask_extractor.extract(interval, variant)
+                if mask.size > 0:
+                    reference_gene_mask = mask.max(-1, keepdims=True)
+            reference_gene_masks.append(reference_gene_mask)
+
+            if splice_site_extractor:
+                splice_sites.append(
+                    splice_site_extractor.extract(interval) * reference_gene_mask
+                )
+            else:
+                splice_sites = None
+
+            indel_masks.append(
+                dna_model.variant_scoring.IndelMask.from_variant(variant, interval)
+            )
+
+        reference_sequence_batch = np.stack(reference_sequences)
+        alternate_sequence_batch = np.stack(alternate_sequences)
+        reference_gene_mask_batch = np.stack(reference_gene_masks)
+        splice_site_batch = np.stack(splice_sites) if splice_sites is not None else None
+        indel_mask_batch = dna_model.jax.tree.map(
+            lambda *xs: np.stack(xs),
+            *indel_masks,
+        )
+        splice_junction_masks = dna_model._SpliceJunctionVariantMasks(
+            splice_sites=splice_site_batch,
+            reference_genes=reference_gene_mask_batch,
+            indel_masks=indel_mask_batch,
+        )
+
+        with self._model._device_context as device, dna_model.jax.transfer_guard(
+            "disallow"
+        ):
+            reference_predictions, alternate_predictions = self._model._predict_variant(
+                self._model._params,
+                self._model._state,
+                dna_model.jax.device_put(reference_sequence_batch, device),
+                dna_model.jax.device_put(alternate_sequence_batch, device),
+                dna_model.jax.device_put(splice_junction_masks, device),
+                dna_model.jax.device_put(
+                    np.full(
+                        (len(variants),),
+                        dna_model.convert_to_organism_index(organism),
+                        dtype=np.int32,
+                    ),
+                    device,
+                ),
+                requested_outputs=requested_outputs,
+                negative_strand_mask=dna_model.jax.device_put(
+                    np.asarray([interval.negative_strand for interval in intervals]),
+                    device,
+                ),
+                strand_reindexing=dna_model.jax.device_put(
+                    metadata.strand_reindexing,
+                    device,
+                ),
+                indel_stitch_input=None,
+            )
+            reference_predictions, alternate_predictions = (
+                dna_model._filter_variant_predictions(
+                    reference_predictions,
+                    alternate_predictions,
+                    track_masks=dna_model.jax.device_put(track_masks, device),
+                )
+            )
+
+        parsed: list[VariantOutputSchema] = []
+        for index, interval in enumerate(intervals):
+            reference_prediction = dna_model.jax.tree.map(
+                lambda x: x[index], reference_predictions
+            )
+            alternate_prediction = dna_model.jax.tree.map(
+                lambda x: x[index], alternate_predictions
+            )
+            result = dna_model.VariantOutput(
+                reference=dna_model._construct_output_from_predictions(
+                    reference_prediction,
+                    track_masks=track_masks,
+                    metadata=metadata,
+                    interval=interval,
+                ),
+                alternate=dna_model._construct_output_from_predictions(
+                    alternate_prediction,
+                    track_masks=track_masks,
+                    metadata=metadata,
+                    interval=interval,
+                ),
+            )
+            parsed.append(self._variant_output_to_schema(result, out_types))
+        return parsed
 
     def predict_variants_batch(
         self,
@@ -163,6 +305,8 @@ class AlphaGenomeEngine:
         variants: list[VariantSchema],
         ontology_terms: list[str] | None = None,
         requested_outputs: list[str] | None = None,
+        max_workers: int | None = None,
+        batch_size: int | None = None,
     ) -> list[VariantOutputSchema]:
         gintervals = [self._build_interval(i) for i in intervals]
         gvariants = [self._build_variant(v) for v in variants]
@@ -170,26 +314,17 @@ class AlphaGenomeEngine:
         outputs = requested_outputs or ["RNA_SEQ"]
         out_types = [self._parse_output_type(o) for o in outputs]
 
-        results = self._model.predict_variants(
-            intervals=gintervals,
-            variants=gvariants,
-            ontology_terms=terms,
-            requested_outputs=out_types,
-        )
-
         parsed: list[VariantOutputSchema] = []
-        for result in results:
-            ref_dict: dict[str, TrackDataSchema | None] = {}
-            alt_dict: dict[str, TrackDataSchema | None] = {}
-            for ot in out_types:
-                name = ot.name
-                ref_dict[name] = self._track_to_schema(
-                    getattr(result.reference, name.lower(), None)
+        chunk_size = batch_size or max_workers or settings.BATCH_SIZE
+        for start in range(0, len(gvariants), chunk_size):
+            parsed.extend(
+                self._predict_variants_chunk_vectorized(
+                    intervals=gintervals[start : start + chunk_size],
+                    variants=gvariants[start : start + chunk_size],
+                    ontology_terms=terms,
+                    out_types=out_types,
                 )
-                alt_dict[name] = self._track_to_schema(
-                    getattr(result.alternate, name.lower(), None)
-                )
-            parsed.append(VariantOutputSchema(reference=ref_dict, alternate=alt_dict))
+            )
         return parsed
 
     def predict_interval(
@@ -219,6 +354,6 @@ class AlphaGenomeEngine:
 
 
 alphagenome_model = AlphaGenomeEngine(
-    settings.model_name,
-    settings.sequence_len,
+    settings.MODEL_NAME,
+    settings.SEQUENCE_LEN,
 )

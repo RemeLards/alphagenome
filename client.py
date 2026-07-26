@@ -1,5 +1,57 @@
 import requests
 from typing import List, Dict, Any, Optional
+from time import perf_counter
+import argparse
+
+
+def _flatten_numbers(value: Any) -> List[float]:
+    if isinstance(value, dict):
+        numbers: List[float] = []
+        for item in value.values():
+            numbers.extend(_flatten_numbers(item))
+        return numbers
+    if isinstance(value, list):
+        numbers: List[float] = []
+        for item in value:
+            numbers.extend(_flatten_numbers(item))
+        return numbers
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    return []
+
+
+def _diff_metrics(left_values: List[float], right_values: List[float]) -> Dict[str, float]:
+    if len(left_values) != len(right_values):
+        raise ValueError(
+            f"outputs have different numeric sizes: {len(left_values)} != {len(right_values)}"
+        )
+
+    diffs = [abs(a - b) for a, b in zip(left_values, right_values)]
+    max_abs = max(diffs, default=0.0)
+    mean_abs = sum(diffs) / len(diffs) if diffs else 0.0
+    rms = (sum(diff * diff for diff in diffs) / len(diffs)) ** 0.5 if diffs else 0.0
+    max_ref = max((abs(v) for v in left_values), default=0.0)
+    return {
+        "count": float(len(diffs)),
+        "max_abs": max_abs,
+        "mean_abs": mean_abs,
+        "rms": rms,
+        "max_abs_relative_to_ref": max_abs / max_ref if max_ref else 0.0,
+    }
+
+
+def _variant_values(output: Dict[str, Any]) -> List[float]:
+    all_left_values: List[float] = []
+
+    for allele in ("reference", "alternate"):
+        for track in output.get(allele, {}).values():
+            if track is not None:
+                all_left_values.extend(_flatten_numbers(track.get("values", [])))
+    return all_left_values
+
+
+def compare_variant_outputs(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, float]:
+    return _diff_metrics(_variant_values(left), _variant_values(right))
 
 class AlphaGenomeClient:
     def __init__(self, base_url: str = "http://localhost:8000/v1"):
@@ -27,14 +79,15 @@ class AlphaGenomeClient:
         }
         response = requests.post(f"{self.base_url}/predict/variant", json=payload)
         response.raise_for_status()
-        return response.status_code
+        return response.json()
 
     def predict_variants_batch(
         self,
         intervals: List[Dict[str, Any]],
         variants: List[Dict[str, Any]],
         ontology_terms: List[str],
-        requested_outputs: List[str]
+        requested_outputs: List[str],
+        batch_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Testa o endpoint POST /v1/predict/variants."""
         payload = {
@@ -43,9 +96,11 @@ class AlphaGenomeClient:
             "ontology_terms": ontology_terms,
             "requested_outputs": requested_outputs
         }
+        if batch_size is not None:
+            payload["batch_size"] = batch_size
         response = requests.post(f"{self.base_url}/predict/variants", json=payload)
         response.raise_for_status()
-        return response.status_code
+        return response.json()
 
     def predict_interval(
         self,
@@ -68,26 +123,30 @@ class AlphaGenomeClient:
 # Script de Testes
 # ==============================================================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rounds", type=int, default=40)
+    args = parser.parse_args()
+
     # Ajuste para a URL onde seu servidor FastAPI está rodando
     client = AlphaGenomeClient(base_url="http://localhost:8000/v1")
 
     # Exemplo de dados (ajuste os campos para corresponder aos seus Pydantic Schemas)
     sample_interval = {
         "chromosome": "chr1",  # era "chr"
-        "start": 1000,
-        "end": 1000 + 8 * 1024,
+        "start": 1_000_000,
+        "end": 1_000_000 + 8 * 1024,
     }
 
     # 2. Ajuste da Variante
     sample_variant = {
         "chromosome": "chr1",  # era "chr"
-        "position": 1500,  # era "pos"
+        "position": 1_000_500,  # era "pos"
         "reference_bases": "A",  # era "ref"
         "alternate_bases": "G",  # era "alt"
     }
 
     sample_terms = ["UBERON:0001157"]
-    sample_outputs = ["RNA_SEQ", "ATAC"]
+    sample_outputs = ["RNA_SEQ"]
 
     # print("--- 1. Testando Health Check ---")
     # try:
@@ -96,29 +155,97 @@ if __name__ == "__main__":
     # except Exception as e:
     #     print(f"Erro no health check: {e}\n")
 
-    print("--- 2. Testando Predict Variant ---")
-    try:
-        variant_res = client.predict_variant(
-            interval=sample_interval,
-            variant=sample_variant,
-            ontology_terms=sample_terms,
-            requested_outputs=sample_outputs
-        )
-        print(f"Predict Variant Resultado: {variant_res}\n")
-    except requests.exceptions.HTTPError as e:
-        print(f"Erro HTTP em Predict Variant: {e.response.status_code} - {e.response.text}\n")
+    intervals = [sample_interval] * 8
+    variants = [sample_variant] * 8
+    rounds = args.rounds
 
-    print("--- 3. Testando Predict Variants (Batch) ---")
+    print("--- Warmup sequencial descartavel ---")
+    client.predict_variant(
+        interval=sample_interval,
+        variant=sample_variant,
+        ontology_terms=sample_terms,
+        requested_outputs=sample_outputs,
+    )
+
+    print("--- Benchmark: 8 chamadas sequenciais ---")
+    sequential_times = []
+    sequential_outputs = []
     try:
-        batch_res = client.predict_variants_batch(
-            intervals=[sample_interval],
-            variants=[sample_variant],
-            ontology_terms=sample_terms,
-            requested_outputs=sample_outputs
-        )
-        print(f"Predict Variants Batch Resultado: {batch_res}\n")
+        for round_index in range(rounds):
+            round_outputs = []
+            start = perf_counter()
+            for interval, variant in zip(intervals, variants):
+                response = client.predict_variant(
+                    interval=interval,
+                    variant=variant,
+                    ontology_terms=sample_terms,
+                    requested_outputs=sample_outputs,
+                )
+                round_outputs.append(response["variant_outputs"][0])
+            sequential_time = perf_counter() - start
+            sequential_times.append(sequential_time)
+            sequential_outputs.extend(round_outputs)
+            print(f"Rodada {round_index + 1}: {sequential_time:.3f}s")
     except requests.exceptions.HTTPError as e:
-        print(f"Erro HTTP em Predict Batch: {e.response.status_code} - {e.response.text}\n")
+        print(f"Erro HTTP no sequencial: {e.response.status_code} - {e.response.text}\n")
+        raise
+
+    print("--- Warmup batch descartavel ---")
+    client.predict_variants_batch(
+        intervals=intervals,
+        variants=variants,
+        ontology_terms=sample_terms,
+        requested_outputs=sample_outputs,
+        batch_size=8,
+    )
+
+    print("--- Benchmark: 1 chamada batch de 8 ---")
+    batch_times = []
+    batch_outputs = []
+    try:
+        for round_index in range(rounds):
+            start = perf_counter()
+            batch_res = client.predict_variants_batch(
+                intervals=intervals,
+                variants=variants,
+                ontology_terms=sample_terms,
+                requested_outputs=sample_outputs,
+                batch_size=8,
+            )
+            batch_time = perf_counter() - start
+            batch_times.append(batch_time)
+            batch_outputs.extend(batch_res["variant_outputs"])
+            print(f"Rodada {round_index + 1}: {batch_time:.3f}s")
+    except requests.exceptions.HTTPError as e:
+        print(f"Erro HTTP no batch: {e.response.status_code} - {e.response.text}\n")
+        raise
+
+    sequential_best = min(sequential_times)
+    batch_best = min(batch_times)
+    sequential_mean = sum(sequential_times) / len(sequential_times)
+    batch_mean = sum(batch_times) / len(batch_times)
+    print("--- Resumo de velocidade ---")
+    print(f"Sequencial melhor: {sequential_best:.3f}s")
+    print(f"Batch melhor: {batch_best:.3f}s")
+    print(f"Speedup melhor: {sequential_best / batch_best:.2f}x")
+    print(f"Sequencial media: {sequential_mean:.3f}s")
+    print(f"Batch media: {batch_mean:.3f}s")
+    print(f"Speedup medio: {sequential_mean / batch_mean:.2f}x")
+
+    print("--- Diferença entre outputs ---")
+    comparisons = [
+        compare_variant_outputs(sequential_output, batch_output)
+        for sequential_output, batch_output in zip(sequential_outputs, batch_outputs)
+    ]
+    max_abs = max(item["max_abs"] for item in comparisons)
+    mean_abs = sum(item["mean_abs"] for item in comparisons) / len(comparisons)
+    rms = sum(item["rms"] for item in comparisons) / len(comparisons)
+    max_rel = max(item["max_abs_relative_to_ref"] for item in comparisons)
+    print(f"Comparações: {len(comparisons)}")
+    print(f"Max abs diff: {max_abs:.8g}")
+    print(f"Mean abs diff: {mean_abs:.8g}")
+    print(f"Mean RMS diff: {rms:.8g}")
+    print(f"Max relative diff: {max_rel:.8g}")
 
     # print("--- 4. Testando Predict Interval ---")
     # try:

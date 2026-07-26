@@ -30,6 +30,8 @@ class PredictVariantBatchRequest(BaseModel):
     variants: list[VariantSchema]
     ontology_terms: list[str] = ["UBERON:0001157"]
     requested_outputs: list[str] = ["RNA_SEQ"]
+    batch_size: int | None = Field(default=None, ge=1)
+    max_workers: int | None = Field(default=None, ge=1)
 
 
 class PredictIntervalRequest(BaseModel):

@@ -31,7 +31,7 @@ def health():
 @router.post("/predict/variant", response_model=PredictVariantResponse)
 def predict_variant(req: PredictVariantRequest):
     
-    if ( abs(req.interval.start - req.interval.end) != settings.sequence_len ):
+    if ( abs(req.interval.start - req.interval.end) != settings.SEQUENCE_LEN ):
         raise HTTPException(
             status_code=422,
             detail="intervals length is differs from sequence_len",
@@ -58,7 +58,7 @@ def predict_variants_batch(req: PredictVariantBatchRequest):
             detail="intervals and variants must have the same length",
         )
     for interval in req.intervals:
-        if ( abs(interval.start - interval.end) != settings.sequence_len ):
+        if ( abs(interval.start - interval.end) != settings.SEQUENCE_LEN ):
             raise HTTPException(
                 status_code=422,
                 detail="intervals length differs from sequence_len",
@@ -69,6 +69,8 @@ def predict_variants_batch(req: PredictVariantBatchRequest):
             variants=req.variants,
             ontology_terms=req.ontology_terms,
             requested_outputs=req.requested_outputs,
+            max_workers=req.max_workers,
+            batch_size=req.batch_size,
         )
         return PredictVariantResponse(variant_outputs=results)
     except Exception as e:
