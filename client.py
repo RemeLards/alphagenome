@@ -53,6 +53,30 @@ def _variant_values(output: Dict[str, Any]) -> List[float]:
 def compare_variant_outputs(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, float]:
     return _diff_metrics(_variant_values(left), _variant_values(right))
 
+
+def _nested_shape(value: Any) -> List[int]:
+    shape = []
+    while isinstance(value, list):
+        shape.append(len(value))
+        value = value[0] if value else []
+    return shape
+
+
+def describe_variant_output(output: Dict[str, Any]) -> None:
+    total = 0
+    for allele in ("reference", "alternate"):
+        for output_name, track in output.get(allele, {}).items():
+            if track is None:
+                continue
+            values = track.get("values", [])
+            count = len(_flatten_numbers(values))
+            total += count
+            print(
+                f"{allele}.{output_name}: shape={_nested_shape(values)} "
+                f"values={count}"
+            )
+    print(f"Total values por variante: {total}")
+
 class AlphaGenomeClient:
     def __init__(self, base_url: str = "http://localhost:8000/v1"):
         self.base_url = base_url.rstrip("/")
@@ -125,6 +149,7 @@ class AlphaGenomeClient:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--rounds", type=int, default=40)
+    parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
 
     # Ajuste para a URL onde seu servidor FastAPI está rodando
@@ -158,6 +183,7 @@ if __name__ == "__main__":
     intervals = [sample_interval] * 8
     variants = [sample_variant] * 8
     rounds = args.rounds
+    batch_size = args.batch_size
 
     print("--- Warmup sequencial descartavel ---")
     client.predict_variant(
@@ -190,16 +216,16 @@ if __name__ == "__main__":
         print(f"Erro HTTP no sequencial: {e.response.status_code} - {e.response.text}\n")
         raise
 
-    print("--- Warmup batch descartavel ---")
+    print(f"--- Warmup batch descartavel (batch_size={batch_size}) ---")
     client.predict_variants_batch(
         intervals=intervals,
         variants=variants,
         ontology_terms=sample_terms,
         requested_outputs=sample_outputs,
-        batch_size=8,
+        batch_size=batch_size,
     )
 
-    print("--- Benchmark: 1 chamada batch de 8 ---")
+    print(f"--- Benchmark: 1 chamada HTTP com 8 variantes (batch_size={batch_size}) ---")
     batch_times = []
     batch_outputs = []
     try:
@@ -210,7 +236,7 @@ if __name__ == "__main__":
                 variants=variants,
                 ontology_terms=sample_terms,
                 requested_outputs=sample_outputs,
-                batch_size=8,
+                batch_size=batch_size,
             )
             batch_time = perf_counter() - start
             batch_times.append(batch_time)
@@ -233,15 +259,21 @@ if __name__ == "__main__":
     print(f"Speedup medio: {sequential_mean / batch_mean:.2f}x")
 
     print("--- Diferença entre outputs ---")
+    print("--- Dimensões comparadas ---")
+    describe_variant_output(sequential_outputs[0])
     comparisons = [
         compare_variant_outputs(sequential_output, batch_output)
         for sequential_output, batch_output in zip(sequential_outputs, batch_outputs)
     ]
+    values_per_comparison = int(comparisons[0]["count"])
+    total_values = values_per_comparison * len(comparisons)
     max_abs = max(item["max_abs"] for item in comparisons)
     mean_abs = sum(item["mean_abs"] for item in comparisons) / len(comparisons)
     rms = sum(item["rms"] for item in comparisons) / len(comparisons)
     max_rel = max(item["max_abs_relative_to_ref"] for item in comparisons)
     print(f"Comparações: {len(comparisons)}")
+    print(f"Values por comparação: {values_per_comparison}")
+    print(f"Values totais comparados: {total_values}")
     print(f"Max abs diff: {max_abs:.8g}")
     print(f"Mean abs diff: {mean_abs:.8g}")
     print(f"Mean RMS diff: {rms:.8g}")

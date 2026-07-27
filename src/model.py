@@ -273,6 +273,8 @@ class AlphaGenomeEngine:
                     track_masks=dna_model.jax.device_put(track_masks, device),
                 )
             )
+        reference_predictions = dna_model.jax.device_get(reference_predictions)
+        alternate_predictions = dna_model.jax.device_get(alternate_predictions)
 
         parsed: list[VariantOutputSchema] = []
         for index, interval in enumerate(intervals):
