@@ -32,8 +32,21 @@ def _load_dotenv(path: str = ".env") -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = _clean_env_value(value)
         os.environ.setdefault(key, value)
+
+
+def _clean_env_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return value
+
+    quote = value[0] if value[0] in {"'", '"'} else ""
+    if quote:
+        end = value.find(quote, 1)
+        return value[1:end] if end != -1 else value[1:]
+
+    return value.split("#", 1)[0].strip()
 
 
 def _env_int(name: str, default: int) -> int:

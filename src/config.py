@@ -1,22 +1,38 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings,SettingsConfigDict
 from enum import IntEnum
 
+
+def _clean_env_bool(value):
+    if not isinstance(value, str):
+        return value
+    value = value.strip()
+    if not value:
+        return value
+    quote = value[0] if value[0] in {"'", '"'} else ""
+    if quote:
+        end = value.find(quote, 1)
+        value = value[1:end] if end != -1 else value[1:]
+    else:
+        value = value.split("#", 1)[0].strip()
+    return value.lower() in {"1", "true", "yes", "y", "on"}
+
 class SequenceLength(IntEnum):
 
-    KB_8 = 8 * 1000
-    KB_16 = 16 * 1000
-    KB_32 = 32 * 1000
-    KB_64 = 64 * 1000
-    KB_128 = 128 * 1000
-    KB_256 = 256 * 1000
-    KB_512 = 512 * 1000
+    K_8 = 8 * 1000
+    K_16 = 16 * 1000
+    K_32 = 32 * 1000
+    K_64 = 64 * 1000
+    K_128 = 128 * 1000
+    K_256 = 256 * 1000
+    K_512 = 512 * 1000
 
-    MB_1 = 1 * 1000 * 1000
-    MB_2 = 2 * 1000 * 1000
+    M_1 = 1 * 1000 * 1000
+    M_2 = 2 * 1000 * 1000
 
 class Settings(BaseSettings):
     MODEL_NAME: str = "all_folds"
-    SEQUENCE_LEN: int = SequenceLength.KB_8
+    SEQUENCE_LEN: int = SequenceLength.K_8
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     LOG_LEVEL: str = "info"
@@ -24,6 +40,11 @@ class Settings(BaseSettings):
     HF_TOKEN: str = ""
     BATCH_SIZE: int = 1
     WINDOW_SWEEP: bool = False
+
+    @field_validator("WINDOW_SWEEP", mode="before")
+    @classmethod
+    def parse_window_sweep(cls, value):
+        return _clean_env_bool(value)
 
     model_config = SettingsConfigDict(
         env_file=".env",

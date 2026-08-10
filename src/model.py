@@ -20,7 +20,7 @@ class AlphaGenomeEngine:
     def __init__(
         self,
         model_name: str = "all_folds",
-        input_size: int = SequenceLength.KB_8,
+        input_size: int = SequenceLength.K_8,
     ):
         self._model_name = model_name
         self._input_size = input_size
