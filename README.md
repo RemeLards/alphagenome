@@ -70,7 +70,7 @@ python3 client.py --base-url http://localhost:8000/v1
 
 ## Window Sweep
 
-O sweep testa batches para janelas ate `16384` por default e imprime CSV:
+O sweep compara sequencial vs batch para janelas ate `16384` por default:
 
 ```bash
 ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num-variants 8 --batch-size 2
@@ -104,12 +104,12 @@ Se o server estiver com `ALPHAGENOME_WINDOW_SWEEP=false`, o client mostra `HTTP 
 
 ## Interpretacao
 
-Use `--window-sweep --batch-only` para medir overhead do endpoint batch sem misturar chamadas sequenciais.
+Use `--window-sweep` para medir sequencial e batch em cada janela. O client imprime o tempo de cada rodada durante a execução e, no fim, mostra o resumo final.
 
-O CSV inclui:
+A tabela inclui:
 
 ```text
-window_size,batch_size,num_variants,best_s,mean_s,variants_per_s,status
+janela, vars, batch, seq melhor, seq media, batch melhor, batch media, speedup, status
 ```
 
 Compare DGX vs A100 usando os mesmos valores de `rounds`, `num_variants`, `batch_size`, `requested_outputs` e `window_sizes`.

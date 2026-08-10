@@ -160,6 +160,49 @@ def describe_variant_output(output: Dict[str, Any]) -> None:
     print(f"Total values por variante: {total}")
 
 
+def _format_seconds(value: float) -> str:
+    return f"{value:.3f}s"
+
+
+def _print_sweep_header() -> None:
+    print()
+    print("Resumo final")
+    print(
+        f"{'janela':>8}  {'vars':>4}  {'batch':>5}  "
+        f"{'seq melhor':>11}  {'seq media':>10}  "
+        f"{'batch melhor':>13}  {'batch media':>11}  "
+        f"{'speedup':>8}  status"
+    )
+    print("-" * 96)
+
+
+def _print_sweep_row(
+    window_size: int,
+    num_variants: int,
+    batch_size: int,
+    sequential_times: List[float],
+    batch_times: List[float],
+    status: str = "ok",
+) -> None:
+    if not sequential_times or not batch_times:
+        print(
+            f"{window_size:>8}  {num_variants:>4}  {batch_size:>5}  "
+            f"{'-':>11}  {'-':>10}  {'-':>13}  {'-':>11}  {'-':>8}  {status}"
+        )
+        return
+
+    sequential_best = min(sequential_times)
+    sequential_mean = sum(sequential_times) / len(sequential_times)
+    batch_best = min(batch_times)
+    batch_mean = sum(batch_times) / len(batch_times)
+    print(
+        f"{window_size:>8}  {num_variants:>4}  {batch_size:>5}  "
+        f"{_format_seconds(sequential_best):>11}  {_format_seconds(sequential_mean):>10}  "
+        f"{_format_seconds(batch_best):>13}  {_format_seconds(batch_mean):>11}  "
+        f"{sequential_mean / batch_mean:>7.2f}x  {status}"
+    )
+
+
 def build_variant_inputs(
     start: int,
     window_size: int,
@@ -210,6 +253,63 @@ def _normalize_batch_pairs(
     )
 
 
+def benchmark_sequential_variants(
+    client: "AlphaGenomeClient",
+    intervals: List[Dict[str, Any]],
+    variants: List[Dict[str, Any]],
+    ontology_terms: List[str],
+    requested_outputs: List[str],
+    rounds: int,
+    print_rounds: bool = False,
+) -> tuple[List[float], List[Dict[str, Any]]]:
+    times = []
+    outputs = []
+    for _ in range(rounds):
+        round_outputs = []
+        start = perf_counter()
+        for interval, variant in zip(intervals, variants):
+            response = client.predict_variant(
+                interval=interval,
+                variant=variant,
+                ontology_terms=ontology_terms,
+                requested_outputs=requested_outputs,
+            )
+            round_outputs.append(response["variant_outputs"][0])
+        times.append(perf_counter() - start)
+        if print_rounds:
+            print(f"  sequencial rodada {len(times):>2}: {_format_seconds(times[-1])}")
+        outputs.extend(round_outputs)
+    return times, outputs
+
+
+def benchmark_batch_variants(
+    client: "AlphaGenomeClient",
+    intervals: List[Dict[str, Any]],
+    variants: List[Dict[str, Any]],
+    ontology_terms: List[str],
+    requested_outputs: List[str],
+    batch_size: int,
+    rounds: int,
+    print_rounds: bool = False,
+) -> tuple[List[float], List[Dict[str, Any]]]:
+    times = []
+    outputs = []
+    for _ in range(rounds):
+        start = perf_counter()
+        response = client.predict_variants_batch(
+            intervals=intervals,
+            variants=variants,
+            ontology_terms=ontology_terms,
+            requested_outputs=requested_outputs,
+            batch_size=batch_size,
+        )
+        times.append(perf_counter() - start)
+        if print_rounds:
+            print(f"  batch      rodada {len(times):>2}: {_format_seconds(times[-1])}")
+        outputs.extend(response["variant_outputs"])
+    return times, outputs
+
+
 def benchmark_batch_window_sizes(
     client: "AlphaGenomeClient",
     window_sizes: List[int],
@@ -220,12 +320,36 @@ def benchmark_batch_window_sizes(
     ontology_terms: List[str],
     requested_outputs: List[str],
 ) -> None:
-    print("--- Benchmark batch por tamanho de janela ---")
-    print("window_size,batch_size,num_variants,best_s,mean_s,variants_per_s,status")
+    print("\nWindow sweep: sequencial vs batch")
+    print(
+        f"rounds={rounds} variantes={num_variants} batch_size={batch_size} "
+        f"outputs={','.join(requested_outputs)}"
+    )
+    rows = []
 
     for window_size in window_sizes:
+        print(f"\nJanela {window_size}")
         intervals, variants = build_variant_inputs(start, window_size, num_variants)
         try:
+            print("  warmup sequencial...")
+            client.predict_variant(
+                interval=intervals[0],
+                variant=variants[0],
+                ontology_terms=ontology_terms,
+                requested_outputs=requested_outputs,
+            )
+            print("  benchmark sequencial...")
+            sequential_times, _ = benchmark_sequential_variants(
+                client=client,
+                intervals=intervals,
+                variants=variants,
+                ontology_terms=ontology_terms,
+                requested_outputs=requested_outputs,
+                rounds=rounds,
+                print_rounds=True,
+            )
+
+            print("  warmup batch...")
             client.predict_variants_batch(
                 intervals=intervals,
                 variants=variants,
@@ -233,31 +357,34 @@ def benchmark_batch_window_sizes(
                 requested_outputs=requested_outputs,
                 batch_size=batch_size,
             )
-
-            times = []
-            for _ in range(rounds):
-                round_start = perf_counter()
-                client.predict_variants_batch(
-                    intervals=intervals,
-                    variants=variants,
-                    ontology_terms=ontology_terms,
-                    requested_outputs=requested_outputs,
-                    batch_size=batch_size,
-                )
-                times.append(perf_counter() - round_start)
-
-            best = min(times)
-            mean = sum(times) / len(times)
-            print(
-                f"{window_size},{batch_size},{num_variants},"
-                f"{best:.6f},{mean:.6f},{num_variants / mean:.6f},ok"
+            print("  benchmark batch...")
+            batch_times, _ = benchmark_batch_variants(
+                client=client,
+                intervals=intervals,
+                variants=variants,
+                ontology_terms=ontology_terms,
+                requested_outputs=requested_outputs,
+                batch_size=batch_size,
+                rounds=rounds,
+                print_rounds=True,
             )
+            rows.append((window_size, sequential_times, batch_times, "ok"))
         except requests.exceptions.HTTPError as e:
             detail = e.response.text.replace("\n", " ").replace(",", ";")
-            print(
-                f"{window_size},{batch_size},{num_variants},"
-                f",,,HTTP {e.response.status_code}: {detail}"
-            )
+            status = f"HTTP {e.response.status_code}: {detail}"
+            print(f"  erro: {status}")
+            rows.append((window_size, [], [], status))
+
+    _print_sweep_header()
+    for window_size, sequential_times, batch_times, status in rows:
+        _print_sweep_row(
+            window_size,
+            num_variants,
+            batch_size,
+            sequential_times,
+            batch_times,
+            status,
+        )
 
 class AlphaGenomeClient:
     def __init__(self, base_url: str = "http://localhost:8000/v1"):
@@ -362,7 +489,7 @@ if __name__ == "__main__":
         "--window-sweep",
         action="store_true",
         default=_window_sweep_default(),
-        help="Compara chamadas batch para janelas de 8k ate 512k.",
+        help="Compara sequencial vs batch para janelas de 8K ate 16K.",
     )
     parser.add_argument(
         "--window-sizes",
@@ -383,7 +510,7 @@ if __name__ == "__main__":
             if args.window_sizes
             else DEFAULT_WINDOW_SIZES
         )
-        window_sizes = [size for size in window_sizes if size <= 512_000]
+        window_sizes = [size for size in window_sizes if size <= 16 * 1024]
         benchmark_batch_window_sizes(
             client=client,
             window_sizes=window_sizes,
@@ -475,16 +602,18 @@ if __name__ == "__main__":
 
     batch_best = min(batch_times)
     batch_mean = sum(batch_times) / len(batch_times)
-    print("--- Resumo de velocidade ---")
-    print(f"Batch melhor: {batch_best:.3f}s")
-    print(f"Batch media: {batch_mean:.3f}s")
+    print("\nResumo")
+    print("| modo | melhor | media |")
+    print("|:---|---:|---:|")
+    print(f"| batch | {_format_seconds(batch_best)} | {_format_seconds(batch_mean)} |")
     if sequential_times:
         sequential_best = min(sequential_times)
         sequential_mean = sum(sequential_times) / len(sequential_times)
-        print(f"Sequencial melhor: {sequential_best:.3f}s")
-        print(f"Speedup melhor: {sequential_best / batch_best:.2f}x")
-        print(f"Sequencial media: {sequential_mean:.3f}s")
-        print(f"Speedup medio: {sequential_mean / batch_mean:.2f}x")
+        print(
+            f"| sequencial | {_format_seconds(sequential_best)} | "
+            f"{_format_seconds(sequential_mean)} |"
+        )
+        print(f"Speedup medio batch vs sequencial: {sequential_mean / batch_mean:.2f}x")
 
     if args.batch_only:
         raise SystemExit(0)
