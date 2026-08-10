@@ -19,6 +19,16 @@ from src.config import settings
 router = APIRouter(prefix="/v1", tags=["predict"])
 
 
+def _validate_interval_length(interval):
+    if settings.WINDOW_SWEEP:
+        return
+    if abs(interval.start - interval.end) != settings.SEQUENCE_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail="interval length differs from sequence_len",
+        )
+
+
 @router.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(
@@ -30,12 +40,7 @@ def health():
 
 @router.post("/predict/variant", response_model=PredictVariantResponse)
 def predict_variant(req: PredictVariantRequest):
-    
-    if ( abs(req.interval.start - req.interval.end) != settings.SEQUENCE_LEN ):
-        raise HTTPException(
-            status_code=422,
-            detail="intervals length is differs from sequence_len",
-        )
+    _validate_interval_length(req.interval)
 
     try:
         result = alphagenome_model.predict_variant(
@@ -58,11 +63,7 @@ def predict_variants_batch(req: PredictVariantBatchRequest):
             detail="intervals and variants must have the same length",
         )
     for interval in req.intervals:
-        if ( abs(interval.start - interval.end) != settings.SEQUENCE_LEN ):
-            raise HTTPException(
-                status_code=422,
-                detail="intervals length differs from sequence_len",
-            )
+        _validate_interval_length(interval)
     try:
         results = alphagenome_model.predict_variants_batch(
             intervals=req.intervals,

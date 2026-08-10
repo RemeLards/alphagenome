@@ -9,7 +9,16 @@ import requests
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_BATCH_SIZE = 8
-DEFAULT_SEQUENCE_LEN = 8 * 1024
+DEFAULT_SEQUENCE_LEN = 8 * 1000
+DEFAULT_WINDOW_SIZES = [
+    8_000,
+    16_000,
+    32_000,
+    64_000,
+    128_000,
+    256_000,
+    512_000,
+]
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -44,6 +53,10 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _parse_int_list(value: str) -> List[int]:
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
 def _default_base_url() -> str:
     base_url = os.getenv("ALPHAGENOME_BASE_URL")
     if base_url:
@@ -56,6 +69,13 @@ def _default_base_url() -> str:
         host = "localhost"
     port = _env_int("ALPHAGENOME_PORT", 8000)
     return f"http://{host}:{port}/v1"
+
+
+def _window_sweep_default() -> bool:
+    return _env_bool(
+        "ALPHAGENOME_CLIENT_WINDOW_SWEEP",
+        _env_bool("ALPHAGENOME_WINDOW_SWEEP"),
+    )
 
 
 def _flatten_numbers(value: Any) -> List[float]:
@@ -130,6 +150,86 @@ def describe_variant_output(output: Dict[str, Any]) -> None:
                 f"values={count}"
             )
     print(f"Total values por variante: {total}")
+
+
+def build_variant_inputs(
+    start: int,
+    window_size: int,
+    num_variants: int,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    intervals = []
+    variants = []
+    variant_offset = min(500, max(1, window_size // 2))
+
+    for index in range(num_variants):
+        interval_start = start + index * (window_size + 1_000)
+        intervals.append(
+            {
+                "chromosome": "chr1",
+                "start": interval_start,
+                "end": interval_start + window_size,
+            }
+        )
+        variants.append(
+            {
+                "chromosome": "chr1",
+                "position": interval_start + variant_offset,
+                "reference_bases": "A",
+                "alternate_bases": "G",
+            }
+        )
+
+    return intervals, variants
+
+
+def benchmark_batch_window_sizes(
+    client: "AlphaGenomeClient",
+    window_sizes: List[int],
+    num_variants: int,
+    batch_size: int,
+    rounds: int,
+    start: int,
+    ontology_terms: List[str],
+    requested_outputs: List[str],
+) -> None:
+    print("--- Benchmark batch por tamanho de janela ---")
+    print("window_size,batch_size,num_variants,best_s,mean_s,variants_per_s,status")
+
+    for window_size in window_sizes:
+        intervals, variants = build_variant_inputs(start, window_size, num_variants)
+        try:
+            client.predict_variants_batch(
+                intervals=intervals,
+                variants=variants,
+                ontology_terms=ontology_terms,
+                requested_outputs=requested_outputs,
+                batch_size=batch_size,
+            )
+
+            times = []
+            for _ in range(rounds):
+                round_start = perf_counter()
+                client.predict_variants_batch(
+                    intervals=intervals,
+                    variants=variants,
+                    ontology_terms=ontology_terms,
+                    requested_outputs=requested_outputs,
+                    batch_size=batch_size,
+                )
+                times.append(perf_counter() - round_start)
+
+            best = min(times)
+            mean = sum(times) / len(times)
+            print(
+                f"{window_size},{batch_size},{num_variants},"
+                f"{best:.6f},{mean:.6f},{num_variants / mean:.6f},ok"
+            )
+        except requests.exceptions.HTTPError as e:
+            detail = e.response.text.replace("\n", " ").replace(",", ";")
+            print(
+                f"{window_size},{batch_size},{num_variants},"
+                f",,,HTTP {e.response.status_code}: {detail}"
+            )
 
 class AlphaGenomeClient:
     def __init__(self, base_url: str = "http://localhost:8000/v1"):
@@ -224,28 +324,43 @@ if __name__ == "__main__":
         default=_env_bool("ALPHAGENOME_CLIENT_BATCH_ONLY"),
         help="Pula warmup/benchmark sequencial e roda direto os testes batch.",
     )
+    parser.add_argument(
+        "--window-sweep",
+        action="store_true",
+        default=_window_sweep_default(),
+        help="Compara chamadas batch para janelas de 8k ate 512k.",
+    )
+    parser.add_argument(
+        "--window-sizes",
+        default=os.getenv("ALPHAGENOME_CLIENT_WINDOW_SIZES"),
+        help="Lista de janelas separadas por virgula. Default: 8000,...,512000.",
+    )
     args = parser.parse_args()
 
     # Ajuste para a URL onde seu servidor FastAPI está rodando
     client = AlphaGenomeClient(base_url=args.base_url)
 
-    # Exemplo de dados (ajuste os campos para corresponder aos seus Pydantic Schemas)
-    sample_interval = {
-        "chromosome": "chr1",  # era "chr"
-        "start": args.start,
-        "end": args.start + args.window_size,
-    }
-
-    # 2. Ajuste da Variante
-    sample_variant = {
-        "chromosome": "chr1",  # era "chr"
-        "position": args.start + 500,  # era "pos"
-        "reference_bases": "A",  # era "ref"
-        "alternate_bases": "G",  # era "alt"
-    }
-
     sample_terms = ["UBERON:0001157"]
     sample_outputs = ["RNA_SEQ"]
+
+    if args.window_sweep:
+        window_sizes = (
+            _parse_int_list(args.window_sizes)
+            if args.window_sizes
+            else DEFAULT_WINDOW_SIZES
+        )
+        window_sizes = [size for size in window_sizes if size <= 512_000]
+        benchmark_batch_window_sizes(
+            client=client,
+            window_sizes=window_sizes,
+            num_variants=args.num_variants,
+            batch_size=args.batch_size,
+            rounds=args.rounds,
+            start=args.start,
+            ontology_terms=sample_terms,
+            requested_outputs=sample_outputs,
+        )
+        raise SystemExit(0)
 
     # print("--- 1. Testando Health Check ---")
     # try:
@@ -254,8 +369,13 @@ if __name__ == "__main__":
     # except Exception as e:
     #     print(f"Erro no health check: {e}\n")
 
-    intervals = [sample_interval] * args.num_variants
-    variants = [sample_variant] * args.num_variants
+    intervals, variants = build_variant_inputs(
+        start=args.start,
+        window_size=args.window_size,
+        num_variants=args.num_variants,
+    )
+    sample_interval = intervals[0]
+    sample_variant = variants[0]
     rounds = args.rounds
     batch_size = args.batch_size
 
