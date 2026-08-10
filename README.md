@@ -9,12 +9,12 @@ Defaults principais:
 ```env
 ALPHAGENOME_HOST=0.0.0.0
 ALPHAGENOME_PORT=8000
-ALPHAGENOME_SEQUENCE_LEN=8000
+ALPHAGENOME_SEQUENCE_LEN=8192
 ALPHAGENOME_BATCH_SIZE=1
 ALPHAGENOME_WINDOW_SWEEP=false
 ```
 
-`ALPHAGENOME_SEQUENCE_LEN` usa janela decimal, nao binaria. Exemplos: `8000`, `16000`, `512000`.
+`ALPHAGENOME_SEQUENCE_LEN` usa base 1024. Exemplos: `8192`, `16384`, `524288`.
 
 `ALPHAGENOME_WINDOW_SWEEP=false` e o default seguro. Com ele desligado, o servidor rejeita requests cuja janela seja diferente de `ALPHAGENOME_SEQUENCE_LEN`.
 
@@ -39,7 +39,7 @@ ALPHAGENOME_WINDOW_SWEEP=true python3 server.py
 Exemplo fixando uma janela especifica:
 
 ```bash
-ALPHAGENOME_SEQUENCE_LEN=512000 python3 server.py
+ALPHAGENOME_SEQUENCE_LEN=524288 python3 server.py
 ```
 
 ## Rodar Client
@@ -53,7 +53,7 @@ python3 client.py
 Flags uteis:
 
 ```bash
-python3 client.py --rounds 10 --num-variants 8 --batch-size 8 --window-size 8000
+python3 client.py --rounds 10 --num-variants 8 --batch-size 8 --window-size 8192
 ```
 
 Pular chamadas sequenciais e testar apenas batch:
@@ -70,7 +70,7 @@ python3 client.py --base-url http://localhost:8000/v1
 
 ## Window Sweep
 
-O sweep testa batches para janelas ate `512000` e imprime CSV:
+O sweep testa batches para janelas ate `524288` e imprime CSV:
 
 ```bash
 ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num-variants 8 --batch-size 8
@@ -79,13 +79,13 @@ ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num
 Janelas default:
 
 ```text
-8000,16000,32000,64000,128000,256000,512000
+8192,16384,32768,65536,131072,262144,524288
 ```
 
 Customizar janelas:
 
 ```bash
-python3 client.py --window-sweep --window-sizes 8000,16000,32000
+python3 client.py --window-sweep --window-sizes 8192,16384,32768
 ```
 
 Tambem existe override especifico do client:
