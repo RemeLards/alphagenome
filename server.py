@@ -1,6 +1,10 @@
 import os
 import warnings
 
+# JAX GPU memory allocation knobs:
+# https://docs.jax.dev/en/latest/gpu_memory_allocation.html
+# "platform" avoids JAX preallocating most GPU memory at process startup. It can
+# be slower, but makes local testing less likely to starve other GPU workloads.
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 

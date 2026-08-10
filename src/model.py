@@ -173,6 +173,12 @@ class AlphaGenomeEngine:
         ontology_terms: list[str],
         out_types: list[dna_model.OutputType],
     ) -> list[VariantOutputSchema]:
+        # O predict_variants publico do AlphaGenome usa ThreadPoolExecutor, mas o
+        # modelo de research serializa a entrada na GPU com o lock de
+        # _device_context. Aqui chamamos o _predict_variant jittado uma vez com
+        # batch B > 1, seguindo o modelo normal de arrays batched do JAX:
+        # https://docs.jax.dev/en/latest/jax-101/03-vectorization.html
+        # Os simbolos internos abaixo vem de alphagenome_research.model.dna_model.
         organism = dna_model.Organism.HOMO_SAPIENS
         requested_outputs = tuple(set(out_types))
         converted_terms = dna_model._convert_ontology_terms(ontology_terms)
@@ -228,6 +234,10 @@ class AlphaGenomeEngine:
         alternate_sequence_batch = np.stack(alternate_sequences)
         reference_gene_mask_batch = np.stack(reference_gene_masks)
         splice_site_batch = np.stack(splice_sites) if splice_sites is not None else None
+        # IndelMask e um pytree; este padrao transforma uma lista de IndelMask
+        # com a mesma estrutura em um unico IndelMask batched, empilhando cada
+        # folha correspondente. Docs: https://docs.jax.dev/en/latest/pytrees.html
+        # API: https://docs.jax.dev/en/latest/_autosummary/jax.tree.map.html
         indel_mask_batch = dna_model.jax.tree.map(
             lambda *xs: np.stack(xs),
             *indel_masks,
@@ -241,6 +251,14 @@ class AlphaGenomeEngine:
         with self._model._device_context as device, dna_model.jax.transfer_guard(
             "disallow"
         ):
+            # transfer_guard("disallow") bloqueia transferencias implicitas, mas
+            # permite device_put/device_get explicitos. Assim fica visivel se uma
+            # conversao Python/NumPy -> device escapou sem querer.
+            # https://docs.jax.dev/en/latest/transfer_guard.html
+            # device_put move explicitamente o batch completo [B, S, 4] e os
+            # pytrees auxiliares para o device escolhido antes da chamada jittada.
+            # A transferencia e assincrona e o resultado fica committed ao device.
+            # https://docs.jax.dev/en/latest/_autosummary/jax.device_put.html
             reference_predictions, alternate_predictions = self._model._predict_variant(
                 self._model._params,
                 self._model._state,
@@ -273,11 +291,20 @@ class AlphaGenomeEngine:
                     track_masks=dna_model.jax.device_put(track_masks, device),
                 )
             )
+        # device_get transfere a arvore de predicoes para o host; se x e um
+        # pytree, os buffers sao copiados em paralelo. Fazemos isso uma vez para
+        # o batch inteiro e depois fatiamos no NumPy/Python, evitando muitas
+        # leituras pequenas por output/item. Relacionado ao dispatch assincrono:
+        # https://docs.jax.dev/en/latest/_autosummary/jax.device_get.html
+        # https://docs.jax.dev/en/latest/async_dispatch.html
         reference_predictions = dna_model.jax.device_get(reference_predictions)
         alternate_predictions = dna_model.jax.device_get(alternate_predictions)
 
         parsed: list[VariantOutputSchema] = []
         for index, interval in enumerate(intervals):
+            # Depois do device_get, cada folha da arvore tem eixo de batch; este
+            # tree.map extrai o item index de todas as folhas preservando a
+            # estrutura esperada por _construct_output_from_predictions.
             reference_prediction = dna_model.jax.tree.map(
                 lambda x: x[index], reference_predictions
             )
