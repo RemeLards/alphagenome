@@ -70,22 +70,22 @@ python3 client.py --base-url http://localhost:8000/v1
 
 ## Window Sweep
 
-O sweep testa batches para janelas ate `524288` e imprime CSV:
+O sweep testa batches para janelas ate `16384` por default e imprime CSV:
 
 ```bash
-ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num-variants 8 --batch-size 8
+ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num-variants 8 --batch-size 2
 ```
 
 Janelas default:
 
 ```text
-8192,16384,32768,65536,131072,262144,524288
+8192,16384
 ```
 
 Customizar janelas:
 
 ```bash
-python3 client.py --window-sweep --window-sizes 8192,16384,32768
+python3 client.py --window-sweep --window-sizes 8192,16384
 ```
 
 Tambem existe override especifico do client:

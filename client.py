@@ -8,16 +8,11 @@ import requests
 
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
-DEFAULT_BATCH_SIZE = 8
+DEFAULT_BATCH_SIZE = 2
 DEFAULT_SEQUENCE_LEN = 8 * 1024
 DEFAULT_WINDOW_SIZES = [
     8 * 1024,
     16 * 1024,
-    32 * 1024,
-    64 * 1024,
-    128 * 1024,
-    256 * 1024,
-    512 * 1024,
 ]
 
 
@@ -372,7 +367,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--window-sizes",
         default=os.getenv("ALPHAGENOME_CLIENT_WINDOW_SIZES"),
-        help="Lista de janelas separadas por virgula. Default: 8192,...,524288.",
+        help="Lista de janelas separadas por virgula. Default: 8192,16384.",
     )
     args = parser.parse_args()
 
