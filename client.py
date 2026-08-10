@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 from pathlib import Path
 from time import perf_counter
@@ -9,11 +10,17 @@ import requests
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_BATCH_SIZE = 2
-DEFAULT_SEQUENCE_LEN = 8 * 1024
+DEFAULT_SEQUENCE_LEN = 8 * 1000
 DEFAULT_WINDOW_SIZES = [
-    8 * 1024,
-    16 * 1024,
+    8 * 1000,
+    16 * 1000,
+    32 * 1000,
+    64 * 1000,
+    128 * 1000,
+    256 * 1000,
+    512 * 1000,
 ]
+DEFAULT_RESULTS_CSV = "window_sweep_results.csv"
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -168,16 +175,17 @@ def _print_sweep_header() -> None:
     print()
     print("Resumo final")
     print(
-        f"{'janela':>8}  {'vars':>4}  {'batch':>5}  "
+        f"{'janela':>8}  {'iters':>5}  {'vars':>4}  {'batch':>5}  "
         f"{'seq melhor':>11}  {'seq media':>10}  "
         f"{'batch melhor':>13}  {'batch media':>11}  "
         f"{'speedup':>8}  status"
     )
-    print("-" * 96)
+    print("-" * 104)
 
 
 def _print_sweep_row(
     window_size: int,
+    rounds: int,
     num_variants: int,
     batch_size: int,
     sequential_times: List[float],
@@ -186,7 +194,7 @@ def _print_sweep_row(
 ) -> None:
     if not sequential_times or not batch_times:
         print(
-            f"{window_size:>8}  {num_variants:>4}  {batch_size:>5}  "
+            f"{window_size:>8}  {rounds:>5}  {num_variants:>4}  {batch_size:>5}  "
             f"{'-':>11}  {'-':>10}  {'-':>13}  {'-':>11}  {'-':>8}  {status}"
         )
         return
@@ -196,11 +204,77 @@ def _print_sweep_row(
     batch_best = min(batch_times)
     batch_mean = sum(batch_times) / len(batch_times)
     print(
-        f"{window_size:>8}  {num_variants:>4}  {batch_size:>5}  "
+        f"{window_size:>8}  {rounds:>5}  {num_variants:>4}  {batch_size:>5}  "
         f"{_format_seconds(sequential_best):>11}  {_format_seconds(sequential_mean):>10}  "
         f"{_format_seconds(batch_best):>13}  {_format_seconds(batch_mean):>11}  "
         f"{sequential_mean / batch_mean:>7.2f}x  {status}"
     )
+
+
+def _sweep_result_row(
+    window_size: int,
+    rounds: int,
+    num_variants: int,
+    batch_size: int,
+    sequential_times: List[float],
+    batch_times: List[float],
+    status: str,
+) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "window_size": window_size,
+        "iterations": rounds,
+        "num_variants": num_variants,
+        "batch_size": batch_size,
+        "status": status,
+        "sequential_times_s": ";".join(f"{value:.6f}" for value in sequential_times),
+        "batch_times_s": ";".join(f"{value:.6f}" for value in batch_times),
+    }
+    if sequential_times and batch_times:
+        sequential_best = min(sequential_times)
+        sequential_mean = sum(sequential_times) / len(sequential_times)
+        batch_best = min(batch_times)
+        batch_mean = sum(batch_times) / len(batch_times)
+        row.update(
+            {
+                "sequential_best_s": f"{sequential_best:.6f}",
+                "sequential_mean_s": f"{sequential_mean:.6f}",
+                "batch_best_s": f"{batch_best:.6f}",
+                "batch_mean_s": f"{batch_mean:.6f}",
+                "speedup_mean": f"{sequential_mean / batch_mean:.6f}",
+            }
+        )
+    else:
+        row.update(
+            {
+                "sequential_best_s": "",
+                "sequential_mean_s": "",
+                "batch_best_s": "",
+                "batch_mean_s": "",
+                "speedup_mean": "",
+            }
+        )
+    return row
+
+
+def _write_sweep_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+    fieldnames = [
+        "window_size",
+        "iterations",
+        "num_variants",
+        "batch_size",
+        "sequential_best_s",
+        "sequential_mean_s",
+        "batch_best_s",
+        "batch_mean_s",
+        "speedup_mean",
+        "status",
+        "sequential_times_s",
+        "batch_times_s",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def build_variant_inputs(
@@ -319,6 +393,7 @@ def benchmark_batch_window_sizes(
     start: int,
     ontology_terms: List[str],
     requested_outputs: List[str],
+    results_csv: str,
 ) -> None:
     print("\nWindow sweep: sequencial vs batch")
     print(
@@ -326,6 +401,7 @@ def benchmark_batch_window_sizes(
         f"outputs={','.join(requested_outputs)}"
     )
     rows = []
+    csv_rows = []
 
     for window_size in window_sizes:
         print(f"\nJanela {window_size}")
@@ -369,22 +445,47 @@ def benchmark_batch_window_sizes(
                 print_rounds=True,
             )
             rows.append((window_size, sequential_times, batch_times, "ok"))
+            csv_rows.append(
+                _sweep_result_row(
+                    window_size,
+                    rounds,
+                    num_variants,
+                    batch_size,
+                    sequential_times,
+                    batch_times,
+                    "ok",
+                )
+            )
         except requests.exceptions.HTTPError as e:
             detail = e.response.text.replace("\n", " ").replace(",", ";")
             status = f"HTTP {e.response.status_code}: {detail}"
             print(f"  erro: {status}")
             rows.append((window_size, [], [], status))
+            csv_rows.append(
+                _sweep_result_row(
+                    window_size,
+                    rounds,
+                    num_variants,
+                    batch_size,
+                    [],
+                    [],
+                    status,
+                )
+            )
 
     _print_sweep_header()
     for window_size, sequential_times, batch_times, status in rows:
         _print_sweep_row(
             window_size,
+            rounds,
             num_variants,
             batch_size,
             sequential_times,
             batch_times,
             status,
         )
+    _write_sweep_csv(results_csv, csv_rows)
+    print(f"\nCSV salvo em: {results_csv}")
 
 class AlphaGenomeClient:
     def __init__(self, base_url: str = "http://localhost:8000/v1"):
@@ -489,12 +590,17 @@ if __name__ == "__main__":
         "--window-sweep",
         action="store_true",
         default=_window_sweep_default(),
-        help="Compara sequencial vs batch para janelas de 8K ate 16K.",
+        help="Compara sequencial vs batch para janelas de 8k ate 512k.",
     )
     parser.add_argument(
         "--window-sizes",
         default=os.getenv("ALPHAGENOME_CLIENT_WINDOW_SIZES"),
-        help="Lista de janelas separadas por virgula. Default: 8192,16384.",
+        help="Lista de janelas separadas por virgula. Default: 8000,...,512000.",
+    )
+    parser.add_argument(
+        "--results-csv",
+        default=os.getenv("ALPHAGENOME_CLIENT_RESULTS_CSV", DEFAULT_RESULTS_CSV),
+        help="Arquivo CSV para salvar o resumo do window sweep.",
     )
     args = parser.parse_args()
 
@@ -510,7 +616,6 @@ if __name__ == "__main__":
             if args.window_sizes
             else DEFAULT_WINDOW_SIZES
         )
-        window_sizes = [size for size in window_sizes if size <= 16 * 1024]
         benchmark_batch_window_sizes(
             client=client,
             window_sizes=window_sizes,
@@ -520,6 +625,7 @@ if __name__ == "__main__":
             start=args.start,
             ontology_terms=sample_terms,
             requested_outputs=sample_outputs,
+            results_csv=args.results_csv,
         )
         raise SystemExit(0)
 

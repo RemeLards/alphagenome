@@ -9,12 +9,12 @@ Defaults principais:
 ```env
 ALPHAGENOME_HOST=0.0.0.0
 ALPHAGENOME_PORT=8000
-ALPHAGENOME_SEQUENCE_LEN=8192
+ALPHAGENOME_SEQUENCE_LEN=8000
 ALPHAGENOME_BATCH_SIZE=1
 ALPHAGENOME_WINDOW_SWEEP=false
 ```
 
-`ALPHAGENOME_SEQUENCE_LEN` usa base 1024. Exemplos: `8192`, `16384`, `524288`.
+`ALPHAGENOME_SEQUENCE_LEN` usa base 1000. Exemplos: `8000`, `16000`, `512000`.
 
 `ALPHAGENOME_WINDOW_SWEEP=false` e o default seguro. Com ele desligado, o servidor rejeita requests cuja janela seja diferente de `ALPHAGENOME_SEQUENCE_LEN`.
 
@@ -39,7 +39,7 @@ ALPHAGENOME_WINDOW_SWEEP=true python3 server.py
 Exemplo fixando uma janela especifica:
 
 ```bash
-ALPHAGENOME_SEQUENCE_LEN=524288 python3 server.py
+ALPHAGENOME_SEQUENCE_LEN=512000 python3 server.py
 ```
 
 ## Rodar Client
@@ -53,7 +53,7 @@ python3 client.py
 Flags uteis:
 
 ```bash
-python3 client.py --rounds 10 --num-variants 8 --batch-size 8 --window-size 8192
+python3 client.py --rounds 10 --num-variants 8 --batch-size 2 --window-size 8000
 ```
 
 Pular chamadas sequenciais e testar apenas batch:
@@ -70,22 +70,34 @@ python3 client.py --base-url http://localhost:8000/v1
 
 ## Window Sweep
 
-O sweep compara sequencial vs batch para janelas ate `16384` por default:
+O sweep compara sequencial vs batch para janelas ate `512000` por default:
 
 ```bash
-ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 10 --num-variants 8 --batch-size 2
+ALPHAGENOME_WINDOW_SWEEP=true python3 client.py --window-sweep --rounds 20 --num-variants 8 --batch-size 2
 ```
 
 Janelas default:
 
 ```text
-8192,16384
+8000,16000,32000,64000,128000,256000,512000
 ```
 
 Customizar janelas:
 
 ```bash
-python3 client.py --window-sweep --window-sizes 8192,16384
+python3 client.py --window-sweep --window-sizes 8000,16000
+```
+
+Para testar apenas 8k em maquina limitada:
+
+```bash
+python3 client.py --window-sweep --window-sizes 8000 --rounds 20 --num-variants 2 --batch-size 2
+```
+
+Salvar em um CSV especifico:
+
+```bash
+python3 client.py --window-sweep --results-csv resultados_sweep.csv
 ```
 
 Tambem existe override especifico do client:
@@ -109,7 +121,9 @@ Use `--window-sweep` para medir sequencial e batch em cada janela. O client impr
 A tabela inclui:
 
 ```text
-janela, vars, batch, seq melhor, seq media, batch melhor, batch media, speedup, status
+janela, iters, vars, batch, seq melhor, seq media, batch melhor, batch media, speedup, status
 ```
+
+O CSV inclui tambem os tempos individuais de cada rodada em `sequential_times_s` e `batch_times_s`.
 
 Compare DGX vs A100 usando os mesmos valores de `rounds`, `num_variants`, `batch_size`, `requested_outputs` e `window_sizes`.
