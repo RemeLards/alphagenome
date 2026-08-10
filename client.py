@@ -195,6 +195,26 @@ def build_variant_inputs(
     return intervals, variants
 
 
+def _normalize_batch_pairs(
+    intervals: Any,
+    variants: Any,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    interval_list = intervals if isinstance(intervals, list) else [intervals]
+    variant_list = variants if isinstance(variants, list) else [variants]
+
+    if len(interval_list) == len(variant_list):
+        return interval_list, variant_list
+    if len(interval_list) == 1:
+        return interval_list * len(variant_list), variant_list
+    if len(variant_list) == 1:
+        return interval_list, variant_list * len(interval_list)
+
+    raise ValueError(
+        "intervals and variants must have the same length, or one side must "
+        f"have length 1 for broadcasting: {len(interval_list)} != {len(variant_list)}"
+    )
+
+
 def benchmark_batch_window_sizes(
     client: "AlphaGenomeClient",
     window_sizes: List[int],
@@ -274,13 +294,19 @@ class AlphaGenomeClient:
 
     def predict_variants_batch(
         self,
-        intervals: List[Dict[str, Any]],
-        variants: List[Dict[str, Any]],
+        intervals: Any,
+        variants: Any,
         ontology_terms: List[str],
         requested_outputs: List[str],
         batch_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Testa o endpoint POST /v1/predict/variants."""
+        intervals, variants = _normalize_batch_pairs(intervals, variants)
+        if len(intervals) != len(variants):
+            raise ValueError(
+                "batch payload invalido: "
+                f"{len(intervals)} intervals != {len(variants)} variants"
+            )
         payload = {
             "intervals": intervals,
             "variants": variants,
@@ -374,13 +400,6 @@ if __name__ == "__main__":
             requested_outputs=sample_outputs,
         )
         raise SystemExit(0)
-
-    # print("--- 1. Testando Health Check ---")
-    # try:
-    #     health_info = client.check_health()
-    #     print(f"Health Status: {health_info}\n")
-    # except Exception as e:
-    #     print(f"Erro no health check: {e}\n")
 
     intervals, variants = build_variant_inputs(
         start=args.start,
