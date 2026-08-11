@@ -10,15 +10,15 @@ import requests
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_BATCH_SIZE = 2
-DEFAULT_SEQUENCE_LEN = 8 * 1000
+DEFAULT_SEQUENCE_LEN = 8 * 1024
 DEFAULT_WINDOW_SIZES = [
-    8 * 1000,
-    16 * 1000,
-    32 * 1000,
-    64 * 1000,
-    128 * 1000,
-    256 * 1000,
-    512 * 1000,
+    8 * 1024,
+    16 * 1024,
+    32 * 1024,
+    64 * 1024,
+    128 * 1024,
+    256 * 1024,
+    512 * 1024,
 ]
 DEFAULT_RESULTS_CSV = "window_sweep_results.csv"
 
@@ -590,12 +590,12 @@ if __name__ == "__main__":
         "--window-sweep",
         action="store_true",
         default=_window_sweep_default(),
-        help="Compara sequencial vs batch para janelas de 8k ate 512k.",
+        help="Compara sequencial vs batch para janelas de 8K ate 512K.",
     )
     parser.add_argument(
         "--window-sizes",
         default=os.getenv("ALPHAGENOME_CLIENT_WINDOW_SIZES"),
-        help="Lista de janelas separadas por virgula. Default: 8000,...,512000.",
+        help="Lista de janelas separadas por virgula. Default: 8192,...,524288.",
     )
     parser.add_argument(
         "--results-csv",
