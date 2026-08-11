@@ -40,6 +40,22 @@ class PredictIntervalRequest(BaseModel):
     requested_outputs: list[str] = ["RNA_SEQ"]
 
 
+class PredictIntervalBatchRequest(BaseModel):
+    intervals: list[IntervalSchema]
+    ontology_terms: list[str] = ["UBERON:0001157"]
+    requested_outputs: list[str] = ["RNA_SEQ"]
+    batch_size: int | None = Field(default=None, ge=1)
+    max_workers: int | None = Field(default=None, ge=1)
+
+
+class PredictSequenceBatchRequest(BaseModel):
+    sequences: list[str]
+    ontology_terms: list[str] = ["UBERON:0001157"]
+    requested_outputs: list[str] = ["RNA_SEQ"]
+    batch_size: int | None = Field(default=None, ge=1)
+    max_workers: int | None = Field(default=None, ge=1)
+
+
 # ─── Response ───────────────────────────────────────────────────────────────
 
 class TrackDataSchema(BaseModel):
@@ -56,6 +72,10 @@ class VariantOutputSchema(BaseModel):
 
 class PredictIntervalResponse(BaseModel):
     outputs: dict[str, TrackDataSchema | None]
+
+
+class PredictIntervalBatchResponse(BaseModel):
+    outputs: list[dict[str, TrackDataSchema | None]]
 
 
 class PredictVariantResponse(BaseModel):

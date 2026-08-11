@@ -6,8 +6,11 @@ from src.schemas import (
     PredictVariantRequest,
     PredictVariantBatchRequest,
     PredictIntervalRequest,
+    PredictIntervalBatchRequest,
+    PredictSequenceBatchRequest,
     PredictVariantResponse,
     PredictIntervalResponse,
+    PredictIntervalBatchResponse,
     MetricsSchema,
     HealthResponse,
 )
@@ -80,6 +83,7 @@ def predict_variants_batch(req: PredictVariantBatchRequest):
 
 @router.post("/predict/interval", response_model=PredictIntervalResponse)
 def predict_interval(req: PredictIntervalRequest):
+    _validate_interval_length(req.interval)
     try:
         outputs = alphagenome_model.predict_interval(
             interval=req.interval,
@@ -87,5 +91,50 @@ def predict_interval(req: PredictIntervalRequest):
             requested_outputs=req.requested_outputs,
         )
         return PredictIntervalResponse(outputs=outputs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/predict/intervals", response_model=PredictIntervalBatchResponse)
+def predict_intervals_batch(req: PredictIntervalBatchRequest):
+    for interval in req.intervals:
+        _validate_interval_length(interval)
+    try:
+        outputs = alphagenome_model.predict_intervals_batch(
+            intervals=req.intervals,
+            ontology_terms=req.ontology_terms,
+            requested_outputs=req.requested_outputs,
+            max_workers=req.max_workers,
+            batch_size=req.batch_size,
+        )
+        return PredictIntervalBatchResponse(outputs=outputs)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/predict/sequences", response_model=PredictIntervalBatchResponse)
+def predict_sequences_batch(req: PredictSequenceBatchRequest):
+    sequence_lengths = {len(sequence) for sequence in req.sequences}
+    if len(sequence_lengths) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="sequences must have the same length",
+        )
+    if not settings.WINDOW_SWEEP and sequence_lengths:
+        sequence_len = next(iter(sequence_lengths))
+        if sequence_len != settings.SEQUENCE_LEN:
+            raise HTTPException(
+                status_code=422,
+                detail="sequence length differs from sequence_len",
+            )
+    try:
+        outputs = alphagenome_model.predict_sequences_batch(
+            sequences=req.sequences,
+            ontology_terms=req.ontology_terms,
+            requested_outputs=req.requested_outputs,
+            max_workers=req.max_workers,
+            batch_size=req.batch_size,
+        )
+        return PredictIntervalBatchResponse(outputs=outputs)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

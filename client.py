@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import argparse
 import csv
 import os
 from pathlib import Path
 from time import perf_counter
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
-
 
 DEFAULT_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_BATCH_SIZE = 2
@@ -558,6 +559,42 @@ class AlphaGenomeClient:
             "requested_outputs": requested_outputs
         }
         response = requests.post(f"{self.base_url}/predict/interval", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def predict_intervals_batch(
+        self,
+        intervals: List[Dict[str, Any]],
+        ontology_terms: List[str],
+        requested_outputs: List[str],
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "intervals": intervals,
+            "ontology_terms": ontology_terms,
+            "requested_outputs": requested_outputs,
+        }
+        if batch_size is not None:
+            payload["batch_size"] = batch_size
+        response = requests.post(f"{self.base_url}/predict/intervals", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def predict_sequences_batch(
+        self,
+        sequences: List[str],
+        ontology_terms: List[str],
+        requested_outputs: List[str],
+        batch_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "sequences": sequences,
+            "ontology_terms": ontology_terms,
+            "requested_outputs": requested_outputs,
+        }
+        if batch_size is not None:
+            payload["batch_size"] = batch_size
+        response = requests.post(f"{self.base_url}/predict/sequences", json=payload)
         response.raise_for_status()
         return response.json()
 

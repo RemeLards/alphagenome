@@ -142,7 +142,111 @@ class AlphaGenomeEngine:
             )
         return VariantOutputSchema(reference=ref_dict, alternate=alt_dict)
 
+    @classmethod
+    def _output_to_schema(
+        cls,
+        result,
+        out_types: list[dna_model.OutputType],
+    ) -> dict[str, TrackDataSchema | None]:
+        out_dict: dict[str, TrackDataSchema | None] = {}
+        for ot in out_types:
+            name = ot.name
+            out_dict[name] = cls._track_to_schema(
+                getattr(result, name.lower(), None)
+            )
+        return out_dict
+
     # ── public API ─────────────────────────────────────────────────────
+
+    def _predict_sequences_chunk_vectorized(
+        self,
+        sequences: list[str],
+        intervals: list[genome.Interval | None],
+        ontology_terms: list[str],
+        out_types: list[dna_model.OutputType],
+    ) -> list[dict[str, TrackDataSchema | None]]:
+        organism = dna_model.Organism.HOMO_SAPIENS
+        requested_outputs = tuple(set(out_types))
+        converted_terms = dna_model._convert_ontology_terms(ontology_terms)
+        metadata = self._model._metadata[organism]
+        track_masks = dna_model.metadata_lib.create_track_masks(
+            metadata,
+            requested_outputs=requested_outputs,
+            requested_ontologies=converted_terms,
+        )
+        sequence_batch = np.stack(
+            [np.asarray(self._model._one_hot_encoder.encode(seq)) for seq in sequences]
+        )
+        negative_strand_mask = np.asarray(
+            [interval.negative_strand if interval is not None else False for interval in intervals]
+        )
+
+        with self._model._device_context as device, dna_model.jax.transfer_guard(
+            "disallow"
+        ):
+            predictions = self._model._predict(
+                self._model._params,
+                self._model._state,
+                dna_model.jax.device_put(sequence_batch, device),
+                dna_model.jax.device_put(
+                    np.full(
+                        (len(sequences),),
+                        dna_model.convert_to_organism_index(organism),
+                        dtype=np.int32,
+                    ),
+                    device,
+                ),
+                requested_outputs=requested_outputs,
+                negative_strand_mask=dna_model.jax.device_put(
+                    negative_strand_mask,
+                    device,
+                ),
+                strand_reindexing=dna_model.jax.device_put(
+                    metadata.strand_reindexing,
+                    device,
+                ),
+            )
+            predictions = dna_model._filter_predictions(
+                predictions,
+                track_masks=dna_model.jax.device_put(track_masks, device),
+            )
+            predictions = dna_model.jax.tree.map(
+                dna_model.tensor_utils.upcast_floating,
+                predictions,
+            )
+            predictions = dna_model.jax.device_put(
+                predictions,
+                dna_model.jax.memory.Space.Host,
+            )
+
+        predictions = dna_model.jax.device_get(predictions)
+        parsed: list[dict[str, TrackDataSchema | None]] = []
+        for index, interval in enumerate(intervals):
+            prediction = dna_model.jax.tree.map(lambda x: x[index], predictions)
+            result = dna_model._construct_output_from_predictions(
+                prediction,
+                track_masks=track_masks,
+                metadata=metadata,
+                interval=interval,
+            )
+            parsed.append(self._output_to_schema(result, out_types))
+        return parsed
+
+    def _predict_intervals_chunk_vectorized(
+        self,
+        intervals: list[genome.Interval],
+        ontology_terms: list[str],
+        out_types: list[dna_model.OutputType],
+    ) -> list[dict[str, TrackDataSchema | None]]:
+        organism = dna_model.Organism.HOMO_SAPIENS
+        fasta_extractor = self._model._get_fasta_extractor(organism)
+        sequences = [fasta_extractor.extract(interval) for interval in intervals]
+        return self._predict_sequences_chunk_vectorized(
+            sequences=sequences,
+            intervals=intervals,
+            ontology_terms=ontology_terms,
+            out_types=out_types,
+        )
 
     def predict_variant(
         self,
@@ -195,6 +299,7 @@ class AlphaGenomeEngine:
         reference_gene_masks: list[np.ndarray] = []
         splice_sites: list[np.ndarray] | None = []
         indel_masks = []
+        indel_stitch_inputs = []
 
         gene_mask_extractor = self._model._gene_mask_extractors.get(organism)
         splice_site_extractor = self._model._splice_site_extractors.get(organism)
@@ -205,12 +310,30 @@ class AlphaGenomeEngine:
                     interval, variant, fasta_extractor
                 )
             )
-            reference_sequences.append(
-                np.asarray(self._model._one_hot_encoder.encode(reference_sequence))
+            reference_sequence_encoded = np.asarray(
+                self._model._one_hot_encoder.encode(reference_sequence)
             )
-            alternate_sequences.append(
-                np.asarray(self._model._one_hot_encoder.encode(alternate_sequence))
+            alternate_sequence_encoded = np.asarray(
+                self._model._one_hot_encoder.encode(alternate_sequence)
             )
+            reference_sequences.append(reference_sequence_encoded)
+            alternate_sequences.append(alternate_sequence_encoded)
+
+            if (
+                self._model._trunk_apply_fn is not None
+                and self._model._heads_apply_fn is not None
+                and (variant.is_deletion or variant.is_insertion)
+            ):
+                indel_stitch_input = dna_model._extract_indel_stitch_input_single(
+                    variant,
+                    interval,
+                    fasta_extractor,
+                    self._model._one_hot_encoder,
+                    reference_sequence_encoded[np.newaxis],
+                    alternate_sequence_encoded[np.newaxis],
+                )
+                if indel_stitch_input is not None:
+                    indel_stitch_inputs.append(indel_stitch_input)
 
             reference_gene_mask = np.ones((interval.width, 1), dtype=bool)
             if gene_mask_extractor:
@@ -247,6 +370,16 @@ class AlphaGenomeEngine:
             reference_genes=reference_gene_mask_batch,
             indel_masks=indel_mask_batch,
         )
+        indel_stitch_input_batch = None
+        if indel_stitch_inputs:
+            if len(indel_stitch_inputs) != len(variants):
+                raise ValueError(
+                    "mixed SNV/indel chunks are not supported inside one vectorized call"
+                )
+            indel_stitch_input_batch = dna_model.jax.tree.map(
+                lambda *xs: dna_model.jnp.concatenate(xs, axis=0),
+                *indel_stitch_inputs,
+            )
 
         with self._model._device_context as device, dna_model.jax.transfer_guard(
             "disallow"
@@ -282,7 +415,11 @@ class AlphaGenomeEngine:
                     metadata.strand_reindexing,
                     device,
                 ),
-                indel_stitch_input=None,
+                indel_stitch_input=dna_model.jax.device_put(
+                    indel_stitch_input_batch, device
+                )
+                if indel_stitch_input_batch is not None
+                else None,
             )
             reference_predictions, alternate_predictions = (
                 dna_model._filter_variant_predictions(
@@ -290,6 +427,22 @@ class AlphaGenomeEngine:
                     alternate_predictions,
                     track_masks=dna_model.jax.device_put(track_masks, device),
                 )
+            )
+            reference_predictions = dna_model.jax.tree.map(
+                dna_model.tensor_utils.upcast_floating,
+                reference_predictions,
+            )
+            alternate_predictions = dna_model.jax.tree.map(
+                dna_model.tensor_utils.upcast_floating,
+                alternate_predictions,
+            )
+            reference_predictions = dna_model.jax.device_put(
+                reference_predictions,
+                dna_model.jax.memory.Space.Host,
+            )
+            alternate_predictions = dna_model.jax.device_put(
+                alternate_predictions,
+                dna_model.jax.memory.Space.Host,
             )
         # device_get transfere a arvore de predicoes para o host; se x e um
         # pytree, os buffers sao copiados em paralelo. Fazemos isso uma vez para
@@ -346,14 +499,32 @@ class AlphaGenomeEngine:
         parsed: list[VariantOutputSchema] = []
         chunk_size = batch_size or max_workers or settings.BATCH_SIZE
         for start in range(0, len(gvariants), chunk_size):
-            parsed.extend(
-                self._predict_variants_chunk_vectorized(
-                    intervals=gintervals[start : start + chunk_size],
-                    variants=gvariants[start : start + chunk_size],
-                    ontology_terms=terms,
-                    out_types=out_types,
+            chunk_intervals = gintervals[start : start + chunk_size]
+            chunk_variants = gvariants[start : start + chunk_size]
+            sub_start = 0
+            while sub_start < len(chunk_variants):
+                is_indel = (
+                    chunk_variants[sub_start].is_deletion
+                    or chunk_variants[sub_start].is_insertion
                 )
-            )
+                sub_end = sub_start + 1
+                while sub_end < len(chunk_variants):
+                    next_is_indel = (
+                        chunk_variants[sub_end].is_deletion
+                        or chunk_variants[sub_end].is_insertion
+                    )
+                    if next_is_indel != is_indel:
+                        break
+                    sub_end += 1
+                parsed.extend(
+                    self._predict_variants_chunk_vectorized(
+                        intervals=chunk_intervals[sub_start:sub_end],
+                        variants=chunk_variants[sub_start:sub_end],
+                        ontology_terms=terms,
+                        out_types=out_types,
+                    )
+                )
+                sub_start = sub_end
         return parsed
 
     def predict_interval(
@@ -373,13 +544,58 @@ class AlphaGenomeEngine:
             requested_outputs=out_types,
         )
 
-        out_dict: dict[str, TrackDataSchema | None] = {}
-        for ot in out_types:
-            name = ot.name
-            out_dict[name] = self._track_to_schema(
-                getattr(result, name.lower(), None)
+        return self._output_to_schema(result, out_types)
+
+    def predict_intervals_batch(
+        self,
+        intervals: list[IntervalSchema],
+        ontology_terms: list[str] | None = None,
+        requested_outputs: list[str] | None = None,
+        max_workers: int | None = None,
+        batch_size: int | None = None,
+    ) -> list[dict[str, TrackDataSchema | None]]:
+        gintervals = [self._build_interval(i) for i in intervals]
+        terms = ontology_terms or ["UBERON:0001157"]
+        outputs = requested_outputs or ["RNA_SEQ"]
+        out_types = [self._parse_output_type(o) for o in outputs]
+
+        parsed: list[dict[str, TrackDataSchema | None]] = []
+        chunk_size = batch_size or max_workers or settings.BATCH_SIZE
+        for start in range(0, len(gintervals), chunk_size):
+            parsed.extend(
+                self._predict_intervals_chunk_vectorized(
+                    intervals=gintervals[start : start + chunk_size],
+                    ontology_terms=terms,
+                    out_types=out_types,
+                )
             )
-        return out_dict
+        return parsed
+
+    def predict_sequences_batch(
+        self,
+        sequences: list[str],
+        ontology_terms: list[str] | None = None,
+        requested_outputs: list[str] | None = None,
+        max_workers: int | None = None,
+        batch_size: int | None = None,
+    ) -> list[dict[str, TrackDataSchema | None]]:
+        terms = ontology_terms or ["UBERON:0001157"]
+        outputs = requested_outputs or ["RNA_SEQ"]
+        out_types = [self._parse_output_type(o) for o in outputs]
+
+        parsed: list[dict[str, TrackDataSchema | None]] = []
+        chunk_size = batch_size or max_workers or settings.BATCH_SIZE
+        for start in range(0, len(sequences), chunk_size):
+            chunk = sequences[start : start + chunk_size]
+            parsed.extend(
+                self._predict_sequences_chunk_vectorized(
+                    sequences=chunk,
+                    intervals=[None] * len(chunk),
+                    ontology_terms=terms,
+                    out_types=out_types,
+                )
+            )
+        return parsed
 
 
 alphagenome_model = AlphaGenomeEngine(

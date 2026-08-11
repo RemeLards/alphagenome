@@ -134,3 +134,38 @@ O CSV inclui tambem os tempos individuais de cada rodada em `sequential_times_s`
 O tamanho do batch fica salvo na coluna `batch_size`.
 
 Compare DGX vs A100 usando os mesmos valores de `rounds`, `num_variants`, `batch_size`, `requested_outputs` e `window_sizes`.
+
+## Endpoints Batch
+
+Variantes:
+
+```text
+POST /v1/predict/variants
+```
+
+Intervalos:
+
+```text
+POST /v1/predict/intervals
+```
+
+Payload minimo:
+
+```json
+{
+  "intervals": [
+    {"chromosome": "chr1", "start": 1000000, "end": 1008192}
+  ],
+  "ontology_terms": ["UBERON:0001157"],
+  "requested_outputs": ["RNA_SEQ"],
+  "batch_size": 2
+}
+```
+
+Sequencias cruas:
+
+```text
+POST /v1/predict/sequences
+```
+
+As sequencias do mesmo request precisam ter o mesmo comprimento.
