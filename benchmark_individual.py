@@ -37,11 +37,11 @@ def _warn_nvidia_smi(message: str) -> None:
         _NVIDIA_SMI_WARNING_PRINTED = True
 
 
-def _gpu_memory_used_mb(gpu_index: int) -> Optional[float]:
-    value = _gpu_memory_used_mb_from_query(gpu_index)
+def _gpu_memory_used_mb(gpu_index: int, process_pid: Optional[int]) -> Optional[float]:
+    value = None if process_pid is not None else _gpu_memory_used_mb_from_query(gpu_index)
     if value is not None:
         return value
-    return _gpu_memory_used_mb_from_table(gpu_index)
+    return _gpu_memory_used_mb_from_table(gpu_index, process_pid)
 
 
 def _gpu_memory_used_mb_from_query(gpu_index: int) -> Optional[float]:
@@ -78,7 +78,10 @@ def _gpu_memory_used_mb_from_query(gpu_index: int) -> Optional[float]:
     return None
 
 
-def _gpu_memory_used_mb_from_table(gpu_index: int) -> Optional[float]:
+def _gpu_memory_used_mb_from_table(
+    gpu_index: int,
+    process_pid: Optional[int],
+) -> Optional[float]:
     try:
         result = subprocess.run(
             ["nvidia-smi"],
@@ -97,23 +100,48 @@ def _gpu_memory_used_mb_from_table(gpu_index: int) -> Optional[float]:
     lines = result.stdout.splitlines()
     gpu_header_pattern = re.compile(rf"^\|\s*{gpu_index}\s+")
     memory_pattern = re.compile(r"(\d+)\s*MiB\s*/\s*\d+\s*MiB")
+    process_pattern = re.compile(r"^\|\s*(\d+)\s+\S+\s+\S+\s+(\d+)\s+.*?\s+(\d+)\s*MiB\s*\|")
 
-    for index, line in enumerate(lines):
-        if not gpu_header_pattern.search(line):
+    if process_pid is None:
+        for index, line in enumerate(lines):
+            if not gpu_header_pattern.search(line):
+                continue
+            for candidate in lines[index : index + 4]:
+                match = memory_pattern.search(candidate)
+                if match:
+                    return float(match.group(1))
+
+    process_total = 0.0
+    matched_process = False
+    for line in lines:
+        match = process_pattern.search(line)
+        if not match:
             continue
-        for candidate in lines[index : index + 4]:
-            match = memory_pattern.search(candidate)
-            if match:
-                return float(match.group(1))
+        row_gpu_index = int(match.group(1))
+        row_pid = int(match.group(2))
+        row_memory_mb = float(match.group(3))
+        if row_gpu_index != gpu_index:
+            continue
+        if process_pid is not None and row_pid != process_pid:
+            continue
+        process_total += row_memory_mb
+        matched_process = True
+
+    if matched_process:
+        return process_total
 
     output = result.stdout.strip() or "<vazio>"
-    _warn_nvidia_smi(f"nao encontrei Memory-Usage da GPU {gpu_index} na saida: {output}")
+    if process_pid is None:
+        _warn_nvidia_smi(f"nao encontrei Memory-Usage/processos da GPU {gpu_index} na saida: {output}")
+    else:
+        _warn_nvidia_smi(f"nao encontrei VRAM do PID {process_pid} na GPU {gpu_index} na saida: {output}")
     return None
 
 
 class GpuMemorySampler:
-    def __init__(self, gpu_index: int, interval: float) -> None:
+    def __init__(self, gpu_index: int, process_pid: Optional[int], interval: float) -> None:
         self.gpu_index = gpu_index
+        self.process_pid = process_pid
         self.interval = interval
         self.peak_mb: Optional[float] = None
         self._running = False
@@ -121,7 +149,7 @@ class GpuMemorySampler:
 
     def start(self) -> None:
         self._running = True
-        self.peak_mb = _gpu_memory_used_mb(self.gpu_index)
+        self.peak_mb = _gpu_memory_used_mb(self.gpu_index, self.process_pid)
         self._thread = threading.Thread(target=self._sample, daemon=True)
         self._thread.start()
 
@@ -129,14 +157,14 @@ class GpuMemorySampler:
         self._running = False
         if self._thread is not None:
             self._thread.join()
-        current = _gpu_memory_used_mb(self.gpu_index)
+        current = _gpu_memory_used_mb(self.gpu_index, self.process_pid)
         if current is not None:
             self.peak_mb = max(self.peak_mb or current, current)
         return self.peak_mb
 
     def _sample(self) -> None:
         while self._running:
-            current = _gpu_memory_used_mb(self.gpu_index)
+            current = _gpu_memory_used_mb(self.gpu_index, self.process_pid)
             if current is not None:
                 self.peak_mb = max(self.peak_mb or current, current)
             sleep(self.interval)
@@ -200,17 +228,18 @@ def _measure_call(
     round_index: int,
     num_individuals: int,
     gpu_index: int,
+    gpu_process_pid: Optional[int],
     poll_interval: float,
     call: Callable[[], None],
 ) -> Dict[str, Any]:
-    vram_before = _gpu_memory_used_mb(gpu_index)
-    sampler = GpuMemorySampler(gpu_index, poll_interval)
+    vram_before = _gpu_memory_used_mb(gpu_index, gpu_process_pid)
+    sampler = GpuMemorySampler(gpu_index, gpu_process_pid, poll_interval)
     sampler.start()
     start = perf_counter()
     call()
     total_duration = perf_counter() - start
     vram_peak = sampler.stop()
-    vram_after = _gpu_memory_used_mb(gpu_index)
+    vram_after = _gpu_memory_used_mb(gpu_index, gpu_process_pid)
 
     row = _result_row(
         mode=mode,
@@ -240,6 +269,7 @@ def benchmark_individual_vs_batch(
     batch_size: int,
     rounds: int,
     gpu_index: int,
+    gpu_process_pid: Optional[int],
     poll_interval: float,
 ) -> List[Dict[str, Any]]:
     rows = []
@@ -272,6 +302,7 @@ def benchmark_individual_vs_batch(
                 round_index=round_index,
                 num_individuals=num_individuals,
                 gpu_index=gpu_index,
+                gpu_process_pid=gpu_process_pid,
                 poll_interval=poll_interval,
                 call=run_individual,
             )
@@ -282,6 +313,7 @@ def benchmark_individual_vs_batch(
                 round_index=round_index,
                 num_individuals=num_individuals,
                 gpu_index=gpu_index,
+                gpu_process_pid=gpu_process_pid,
                 poll_interval=poll_interval,
                 call=run_batch,
             )
@@ -335,6 +367,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=_env_int("ALPHAGENOME_BATCH_SIZE", DEFAULT_BATCH_SIZE))
     parser.add_argument("--base-url", default=_default_base_url())
     parser.add_argument("--gpu-index", type=int, default=0, help="Indice da GPU monitorada pelo nvidia-smi.")
+    parser.add_argument(
+        "--gpu-process-pid",
+        type=int,
+        help="Opcional: mede apenas a VRAM desse PID na tabela de processos do nvidia-smi.",
+    )
     parser.add_argument("--window-size", type=int, default=_env_int("ALPHAGENOME_SEQUENCE_LEN", DEFAULT_SEQUENCE_LEN))
     parser.add_argument("--start", type=int, default=1_000_000)
     parser.add_argument("--ontology-terms", default="UBERON:0001157")
@@ -356,6 +393,7 @@ def main() -> None:
     print("--- Configuracao ---")
     print(f"base_url={args.base_url}")
     print(f"gpu_index={args.gpu_index}")
+    print(f"gpu_process_pid={args.gpu_process_pid or 'todos'}")
     print(f"window_size={args.window_size}")
     print(f"num_individuals={args.num_individuals}")
     print(f"rounds={args.rounds}")
@@ -392,6 +430,7 @@ def main() -> None:
         batch_size=args.batch_size,
         rounds=args.rounds,
         gpu_index=args.gpu_index,
+        gpu_process_pid=args.gpu_process_pid,
         poll_interval=args.poll_interval,
     )
 
