@@ -88,10 +88,16 @@ Customizar janelas:
 python3 client.py --window-sweep --window-sizes 8192,16384
 ```
 
+Testar varios tamanhos de batch para cada janela:
+
+```bash
+python3 client.py --window-sweep --window-sizes 8192,16384 --batch-sizes 1,2,4,8 --rounds 20
+```
+
 Para testar apenas 8k em maquina limitada:
 
 ```bash
-python3 client.py --window-sweep --window-sizes 8192 --rounds 20 --num-variants 2 --batch-size 2
+python3 client.py --window-sweep --window-sizes 8192 --rounds 20 --num-variants 2 --batch-sizes 1,2
 ```
 
 Salvar em um CSV especifico:
@@ -125,5 +131,6 @@ janela, iters, vars, batch, seq melhor, seq media, batch melhor, batch media, sp
 ```
 
 O CSV inclui tambem os tempos individuais de cada rodada em `sequential_times_s` e `batch_times_s`.
+O tamanho do batch fica salvo na coluna `batch_size`.
 
 Compare DGX vs A100 usando os mesmos valores de `rounds`, `num_variants`, `batch_size`, `requested_outputs` e `window_sizes`.

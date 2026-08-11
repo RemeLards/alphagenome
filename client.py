@@ -388,7 +388,7 @@ def benchmark_batch_window_sizes(
     client: "AlphaGenomeClient",
     window_sizes: List[int],
     num_variants: int,
-    batch_size: int,
+    batch_sizes: List[int],
     rounds: int,
     start: int,
     ontology_terms: List[str],
@@ -397,7 +397,8 @@ def benchmark_batch_window_sizes(
 ) -> None:
     print("\nWindow sweep: sequencial vs batch")
     print(
-        f"rounds={rounds} variantes={num_variants} batch_size={batch_size} "
+        f"rounds={rounds} variantes={num_variants} "
+        f"batch_sizes={','.join(str(value) for value in batch_sizes)} "
         f"outputs={','.join(requested_outputs)}"
     )
     rows = []
@@ -425,56 +426,58 @@ def benchmark_batch_window_sizes(
                 print_rounds=True,
             )
 
-            print("  warmup batch...")
-            client.predict_variants_batch(
-                intervals=intervals,
-                variants=variants,
-                ontology_terms=ontology_terms,
-                requested_outputs=requested_outputs,
-                batch_size=batch_size,
-            )
-            print("  benchmark batch...")
-            batch_times, _ = benchmark_batch_variants(
-                client=client,
-                intervals=intervals,
-                variants=variants,
-                ontology_terms=ontology_terms,
-                requested_outputs=requested_outputs,
-                batch_size=batch_size,
-                rounds=rounds,
-                print_rounds=True,
-            )
-            rows.append((window_size, sequential_times, batch_times, "ok"))
-            csv_rows.append(
-                _sweep_result_row(
-                    window_size,
-                    rounds,
-                    num_variants,
-                    batch_size,
-                    sequential_times,
-                    batch_times,
-                    "ok",
+            for batch_size in batch_sizes:
+                print(f"  warmup batch (batch_size={batch_size})...")
+                client.predict_variants_batch(
+                    intervals=intervals,
+                    variants=variants,
+                    ontology_terms=ontology_terms,
+                    requested_outputs=requested_outputs,
+                    batch_size=batch_size,
                 )
-            )
+                print(f"  benchmark batch (batch_size={batch_size})...")
+                batch_times, _ = benchmark_batch_variants(
+                    client=client,
+                    intervals=intervals,
+                    variants=variants,
+                    ontology_terms=ontology_terms,
+                    requested_outputs=requested_outputs,
+                    batch_size=batch_size,
+                    rounds=rounds,
+                    print_rounds=True,
+                )
+                rows.append((window_size, batch_size, sequential_times, batch_times, "ok"))
+                csv_rows.append(
+                    _sweep_result_row(
+                        window_size,
+                        rounds,
+                        num_variants,
+                        batch_size,
+                        sequential_times,
+                        batch_times,
+                        "ok",
+                    )
+                )
         except requests.exceptions.HTTPError as e:
             detail = e.response.text.replace("\n", " ").replace(",", ";")
             status = f"HTTP {e.response.status_code}: {detail}"
             print(f"  erro: {status}")
-            rows.append((window_size, [], [], status))
-            csv_rows.append(
-                _sweep_result_row(
-                    window_size,
-                    rounds,
-                    num_variants,
-                    batch_size,
-                    [],
-                    [],
-                    status,
+            for batch_size in batch_sizes:
+                rows.append((window_size, batch_size, [], [], status))
+                csv_rows.append(
+                    _sweep_result_row(
+                        window_size,
+                        rounds,
+                        num_variants,
+                        batch_size,
+                        [],
+                        [],
+                        status,
+                    )
                 )
-            )
 
     _print_sweep_header()
-    for window_size, sequential_times, batch_times, status in rows:
+    for window_size, batch_size, sequential_times, batch_times, status in rows:
         _print_sweep_row(
             window_size,
             rounds,
@@ -572,6 +575,11 @@ if __name__ == "__main__":
         type=int,
         default=_env_int("ALPHAGENOME_BATCH_SIZE", DEFAULT_BATCH_SIZE),
     )
+    parser.add_argument(
+        "--batch-sizes",
+        default=os.getenv("ALPHAGENOME_CLIENT_BATCH_SIZES"),
+        help="Lista de batch sizes para window sweep, separada por virgula. Ex: 1,2,4,8.",
+    )
     parser.add_argument("--num-variants", type=int, default=8)
     parser.add_argument(
         "--window-size",
@@ -616,11 +624,16 @@ if __name__ == "__main__":
             if args.window_sizes
             else DEFAULT_WINDOW_SIZES
         )
+        batch_sizes = (
+            _parse_int_list(args.batch_sizes)
+            if args.batch_sizes
+            else [args.batch_size]
+        )
         benchmark_batch_window_sizes(
             client=client,
             window_sizes=window_sizes,
             num_variants=args.num_variants,
-            batch_size=args.batch_size,
+            batch_sizes=batch_sizes,
             rounds=args.rounds,
             start=args.start,
             ontology_terms=sample_terms,
