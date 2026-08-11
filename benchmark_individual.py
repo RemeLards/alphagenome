@@ -26,6 +26,14 @@ DEFAULT_RESULTS_CSV = "individual_vs_batch_benchmark_results.csv"
 DEFAULT_NUM_INDIVIDUALS = 8
 DEFAULT_POLL_INTERVAL = 0.05
 DEFAULT_ROUNDS = 20
+_NVIDIA_SMI_WARNING_PRINTED = False
+
+
+def _warn_nvidia_smi(message: str) -> None:
+    global _NVIDIA_SMI_WARNING_PRINTED
+    if not _NVIDIA_SMI_WARNING_PRINTED:
+        print(f"Aviso: nao foi possivel medir VRAM via nvidia-smi: {message}")
+        _NVIDIA_SMI_WARNING_PRINTED = True
 
 
 def _gpu_memory_used_mb(gpu_index: int) -> Optional[float]:
@@ -33,22 +41,36 @@ def _gpu_memory_used_mb(gpu_index: int) -> Optional[float]:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                f"--id={gpu_index}",
-                "--query-gpu=memory.used",
+                "--query-gpu=index,memory.used",
                 "--format=csv,noheader,nounits",
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except FileNotFoundError:
+        _warn_nvidia_smi("comando nvidia-smi nao encontrado no PATH")
+        return None
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or str(e)).strip()
+        _warn_nvidia_smi(detail)
         return None
 
-    value = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    for line in result.stdout.strip().splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 2:
+            continue
+        if parts[0] != str(gpu_index):
+            continue
+        try:
+            return float(parts[1])
+        except ValueError:
+            _warn_nvidia_smi(f"saida inesperada: {line!r}")
+            return None
+
+    output = result.stdout.strip() or "<vazio>"
+    _warn_nvidia_smi(f"GPU index {gpu_index} nao encontrado na saida: {output}")
+    return None
 
 
 class GpuMemorySampler:
