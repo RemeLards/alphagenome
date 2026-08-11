@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import subprocess
 import threading
 from statistics import mean
@@ -37,6 +38,13 @@ def _warn_nvidia_smi(message: str) -> None:
 
 
 def _gpu_memory_used_mb(gpu_index: int) -> Optional[float]:
+    value = _gpu_memory_used_mb_from_query(gpu_index)
+    if value is not None:
+        return value
+    return _gpu_memory_used_mb_from_table(gpu_index)
+
+
+def _gpu_memory_used_mb_from_query(gpu_index: int) -> Optional[float]:
     try:
         result = subprocess.run(
             [
@@ -65,11 +73,41 @@ def _gpu_memory_used_mb(gpu_index: int) -> Optional[float]:
         try:
             return float(parts[1])
         except ValueError:
-            _warn_nvidia_smi(f"saida inesperada: {line!r}")
             return None
 
+    return None
+
+
+def _gpu_memory_used_mb_from_table(gpu_index: int) -> Optional[float]:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        _warn_nvidia_smi("comando nvidia-smi nao encontrado no PATH")
+        return None
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or str(e)).strip()
+        _warn_nvidia_smi(detail)
+        return None
+
+    lines = result.stdout.splitlines()
+    gpu_header_pattern = re.compile(rf"^\|\s*{gpu_index}\s+")
+    memory_pattern = re.compile(r"(\d+)\s*MiB\s*/\s*\d+\s*MiB")
+
+    for index, line in enumerate(lines):
+        if not gpu_header_pattern.search(line):
+            continue
+        for candidate in lines[index : index + 4]:
+            match = memory_pattern.search(candidate)
+            if match:
+                return float(match.group(1))
+
     output = result.stdout.strip() or "<vazio>"
-    _warn_nvidia_smi(f"GPU index {gpu_index} nao encontrado na saida: {output}")
+    _warn_nvidia_smi(f"nao encontrei Memory-Usage da GPU {gpu_index} na saida: {output}")
     return None
 
 
