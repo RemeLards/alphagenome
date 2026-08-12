@@ -225,6 +225,15 @@ def _inspect_variant_response_shape(
         )
         if names:
             print(f"{allele}.{output_name}.names={names}")
+            unique_names = list(dict.fromkeys(names))
+            if len(unique_names) != len(names):
+                print(
+                    f"{allele}.{output_name}: {len(names) - len(unique_names)} "
+                    "tracks duplicados pelo nome"
+                )
+            for term in ontology_terms:
+                term_count = sum(1 for name in names if name.startswith(term))
+                print(f"{allele}.{output_name}: {term} -> {term_count} tracks")
         if column_count == expected_tracks:
             print(f"{allele}.{output_name}: OK, tensor parece ser <dimensao grande>:{expected_tracks}")
         elif effective_columns == expected_tracks:
@@ -235,7 +244,7 @@ def _inspect_variant_response_shape(
         else:
             print(
                 f"{allele}.{output_name}: ATENCAO, colunas nao batem com {expected_tracks}; "
-                "confira names para saber o que cada track representa"
+                "ontologias filtram tracks, mas cada ontologia pode ter varios tracks RNA-seq"
             )
 
 
@@ -382,30 +391,34 @@ def benchmark_individual_vs_batch(
         response.get("variant_outputs", [])
 
     for round_index in range(1, rounds + 1):
-        rows.append(
-            _measure_call(
-                mode="individual",
-                round_index=round_index,
-                num_individuals=num_individuals,
-                model_inputs=model_inputs,
-                gpu_index=gpu_index,
-                gpu_process_pid=gpu_process_pid,
-                poll_interval=poll_interval,
-                call=run_individual,
+        try:
+            rows.append(
+                _measure_call(
+                    mode="individual",
+                    round_index=round_index,
+                    num_individuals=num_individuals,
+                    model_inputs=model_inputs,
+                    gpu_index=gpu_index,
+                    gpu_process_pid=gpu_process_pid,
+                    poll_interval=poll_interval,
+                    call=run_individual,
+                )
             )
-        )
-        rows.append(
-            _measure_call(
-                mode="batch",
-                round_index=round_index,
-                num_individuals=num_individuals,
-                model_inputs=model_inputs,
-                gpu_index=gpu_index,
-                gpu_process_pid=gpu_process_pid,
-                poll_interval=poll_interval,
-                call=run_batch,
+            rows.append(
+                _measure_call(
+                    mode="batch",
+                    round_index=round_index,
+                    num_individuals=num_individuals,
+                    model_inputs=model_inputs,
+                    gpu_index=gpu_index,
+                    gpu_process_pid=gpu_process_pid,
+                    poll_interval=poll_interval,
+                    call=run_batch,
+                )
             )
-        )
+        except KeyboardInterrupt:
+            print("\nBenchmark interrompido pelo usuario; retornando resultados completos ja coletados.")
+            return rows
     return rows
 
 
@@ -527,23 +540,30 @@ def main() -> None:
         raise
 
     print("\n--- Benchmark: individual sequencial vs batch ---")
-    rows = benchmark_individual_vs_batch(
-        client=client,
-        intervals=intervals,
-        variants=variants,
-        ontology_terms=ontology_terms,
-        requested_outputs=requested_outputs,
-        batch_size=args.batch_size,
-        rounds=args.rounds,
-        num_individuals=args.num_individuals,
-        gpu_index=args.gpu_index,
-        gpu_process_pid=args.gpu_process_pid,
-        poll_interval=args.poll_interval,
-    )
+    rows = []
+    try:
+        rows = benchmark_individual_vs_batch(
+            client=client,
+            intervals=intervals,
+            variants=variants,
+            ontology_terms=ontology_terms,
+            requested_outputs=requested_outputs,
+            batch_size=args.batch_size,
+            rounds=args.rounds,
+            num_individuals=args.num_individuals,
+            gpu_index=args.gpu_index,
+            gpu_process_pid=args.gpu_process_pid,
+            poll_interval=args.poll_interval,
+        )
+    except KeyboardInterrupt:
+        print("\nBenchmark interrompido pelo usuario; salvando resultados completos ja coletados.")
 
-    _print_summary(rows)
+    if rows:
+        _print_summary(rows)
+    else:
+        print("Nenhuma rodada completa coletada.")
 
-    if not args.no_csv:
+    if rows and not args.no_csv:
         _write_csv(args.results_csv, rows)
         print(f"CSV salvo em: {args.results_csv}")
 
