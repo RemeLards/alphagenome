@@ -24,9 +24,12 @@ from client import (
 )
 
 DEFAULT_RESULTS_CSV = "individual_vs_batch_benchmark_results.csv"
-DEFAULT_NUM_INDIVIDUALS = 8
+DEFAULT_NUM_INDIVIDUALS = 4
+DEFAULT_BATCH_SIZE = 8
+DEFAULT_STRANDS = "+,-"
+DEFAULT_ONTOLOGY_TERMS = "UBERON:0001157,UBERON:0002107,UBERON:0002048"
 DEFAULT_POLL_INTERVAL = 0.05
-DEFAULT_ROUNDS = 20
+DEFAULT_ROUNDS = 10
 _NVIDIA_SMI_WARNING_PRINTED = False
 
 
@@ -178,10 +181,85 @@ def _parse_csv_list(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _nested_shape(value: Any) -> List[int]:
+    shape = []
+    while isinstance(value, list):
+        shape.append(len(value))
+        value = value[0] if value else []
+    return shape
+
+
+def _inspect_variant_response_shape(
+    response: Dict[str, Any],
+    requested_outputs: List[str],
+    ontology_terms: List[str],
+    strands: List[str],
+) -> None:
+    expected_tracks = len(ontology_terms) * len(strands)
+    variant_outputs = response.get("variant_outputs", [])
+    if not variant_outputs:
+        print("Checagem de saida: resposta sem variant_outputs")
+        return
+
+    output_name = requested_outputs[0]
+    first = variant_outputs[0]
+    print("\n--- Checagem de saida ---")
+    print(
+        f"esperado se tracks = ontologias x strands: "
+        f"{len(ontology_terms)} x {len(strands)} = {expected_tracks}"
+    )
+    for allele in ("reference", "alternate"):
+        track = first.get(allele, {}).get(output_name)
+        if track is None:
+            print(f"{allele}.{output_name}: ausente")
+            continue
+        values = track.get("values", [])
+        names = track.get("names", [])
+        shape = _nested_shape(values)
+        column_count = shape[-1] if len(shape) >= 2 else len(names)
+        effective_columns = column_count * len(strands)
+        print(
+            f"{allele}.{output_name}: shape={shape} names={len(names)} "
+            f"colunas_por_input={column_count} "
+            f"colunas_por_individuo_com_strands_expandidos={effective_columns}"
+        )
+        if names:
+            print(f"{allele}.{output_name}.names={names}")
+        if column_count == expected_tracks:
+            print(f"{allele}.{output_name}: OK, tensor parece ser <dimensao grande>:{expected_tracks}")
+        elif effective_columns == expected_tracks:
+            print(
+                f"{allele}.{output_name}: OK agregado por individuo: "
+                f"{column_count} colunas/input x {len(strands)} strands = {expected_tracks}"
+            )
+        else:
+            print(
+                f"{allele}.{output_name}: ATENCAO, colunas nao batem com {expected_tracks}; "
+                "confira names para saber o que cada track representa"
+            )
+
+
+def _expand_inputs_by_strand(
+    intervals: List[Dict[str, Any]],
+    variants: List[Dict[str, Any]],
+    strands: List[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    expanded_intervals = []
+    expanded_variants = []
+    for interval, variant in zip(intervals, variants, strict=True):
+        for strand in strands:
+            interval_with_strand = dict(interval)
+            interval_with_strand["strand"] = strand
+            expanded_intervals.append(interval_with_strand)
+            expanded_variants.append(dict(variant))
+    return expanded_intervals, expanded_variants
+
+
 def _result_row(
     mode: str,
     round_index: int,
     num_individuals: int,
+    model_inputs: int,
     total_duration_s: float,
     vram_before_mb: Optional[float],
     vram_peak_mb: Optional[float],
@@ -196,8 +274,10 @@ def _result_row(
         "mode": mode,
         "round": round_index,
         "num_individuals": num_individuals,
+        "model_inputs": model_inputs,
         "total_duration_s": f"{total_duration_s:.6f}",
         "duration_per_individual_s": f"{total_duration_s / num_individuals:.6f}",
+        "duration_per_model_input_s": f"{total_duration_s / model_inputs:.6f}",
         "vram_before_mb": "" if vram_before_mb is None else f"{vram_before_mb:.3f}",
         "vram_peak_mb": "" if vram_peak_mb is None else f"{vram_peak_mb:.3f}",
         "vram_after_mb": "" if vram_after_mb is None else f"{vram_after_mb:.3f}",
@@ -210,8 +290,10 @@ def _write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         "mode",
         "round",
         "num_individuals",
+        "model_inputs",
         "total_duration_s",
         "duration_per_individual_s",
+        "duration_per_model_input_s",
         "vram_before_mb",
         "vram_peak_mb",
         "vram_after_mb",
@@ -227,6 +309,7 @@ def _measure_call(
     mode: str,
     round_index: int,
     num_individuals: int,
+    model_inputs: int,
     gpu_index: int,
     gpu_process_pid: Optional[int],
     poll_interval: float,
@@ -245,6 +328,7 @@ def _measure_call(
         mode=mode,
         round_index=round_index,
         num_individuals=num_individuals,
+        model_inputs=model_inputs,
         total_duration_s=total_duration,
         vram_before_mb=vram_before,
         vram_peak_mb=vram_peak,
@@ -254,6 +338,7 @@ def _measure_call(
         f"{mode:<10} rodada {round_index:>2}: "
         f"total={_format_seconds(total_duration)} "
         f"por_individuo={_format_seconds(total_duration / num_individuals)} "
+        f"por_input={_format_seconds(total_duration / model_inputs)} "
         f"vram_pico={_format_mb(vram_peak)} "
         f"delta_pico={_format_mb(float(row['vram_peak_delta_mb']) if row['vram_peak_delta_mb'] else None)}"
     )
@@ -268,12 +353,13 @@ def benchmark_individual_vs_batch(
     requested_outputs: List[str],
     batch_size: int,
     rounds: int,
+    num_individuals: int,
     gpu_index: int,
     gpu_process_pid: Optional[int],
     poll_interval: float,
 ) -> List[Dict[str, Any]]:
     rows = []
-    num_individuals = len(variants)
+    model_inputs = len(variants)
 
     def run_individual() -> None:
         for interval, variant in zip(intervals, variants):
@@ -301,6 +387,7 @@ def benchmark_individual_vs_batch(
                 mode="individual",
                 round_index=round_index,
                 num_individuals=num_individuals,
+                model_inputs=model_inputs,
                 gpu_index=gpu_index,
                 gpu_process_pid=gpu_process_pid,
                 poll_interval=poll_interval,
@@ -312,6 +399,7 @@ def benchmark_individual_vs_batch(
                 mode="batch",
                 round_index=round_index,
                 num_individuals=num_individuals,
+                model_inputs=model_inputs,
                 gpu_index=gpu_index,
                 gpu_process_pid=gpu_process_pid,
                 poll_interval=poll_interval,
@@ -329,18 +417,21 @@ def _print_summary(rows: List[Dict[str, Any]]) -> None:
     print("\nResumo")
     print(
         "| modo | rodadas | tempo total medio | tempo medio/individuo | "
-        "tempo melhor/individuo | VRAM pico media | VRAM pico maxima | delta VRAM medio |"
+        "tempo medio/input | tempo melhor/individuo | VRAM pico media | "
+        "VRAM pico maxima | delta VRAM medio |"
     )
-    print("|:---|---:|---:|---:|---:|---:|---:|---:|")
+    print("|:---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for mode in ("individual", "batch"):
         mode_rows = [row for row in rows if row["mode"] == mode]
         total_times = _float_values(mode_rows, "total_duration_s")
         per_individual_times = _float_values(mode_rows, "duration_per_individual_s")
+        per_model_input_times = _float_values(mode_rows, "duration_per_model_input_s")
         vram_peaks = _float_values(mode_rows, "vram_peak_mb")
         vram_deltas = _float_values(mode_rows, "vram_peak_delta_mb")
         print(
             f"| {mode} | {len(mode_rows)} | {_format_seconds(mean(total_times))} | "
             f"{_format_seconds(mean(per_individual_times))} | "
+            f"{_format_seconds(mean(per_model_input_times))} | "
             f"{_format_seconds(min(per_individual_times))} | "
             f"{_format_mb(mean(vram_peaks) if vram_peaks else None)} | "
             f"{_format_mb(max(vram_peaks) if vram_peaks else None)} | "
@@ -365,6 +456,11 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--num-individuals", type=int, default=DEFAULT_NUM_INDIVIDUALS)
     parser.add_argument("--batch-size", type=int, default=_env_int("ALPHAGENOME_BATCH_SIZE", DEFAULT_BATCH_SIZE))
+    parser.add_argument(
+        "--strands",
+        default=DEFAULT_STRANDS,
+        help="Strands por individuo, separados por virgula. Default: +,-.",
+    )
     parser.add_argument("--base-url", default=_default_base_url())
     parser.add_argument("--gpu-index", type=int, default=0, help="Indice da GPU monitorada pelo nvidia-smi.")
     parser.add_argument(
@@ -374,7 +470,7 @@ def main() -> None:
     )
     parser.add_argument("--window-size", type=int, default=_env_int("ALPHAGENOME_SEQUENCE_LEN", DEFAULT_SEQUENCE_LEN))
     parser.add_argument("--start", type=int, default=1_000_000)
-    parser.add_argument("--ontology-terms", default="UBERON:0001157")
+    parser.add_argument("--ontology-terms", default=DEFAULT_ONTOLOGY_TERMS)
     parser.add_argument("--requested-outputs", default="RNA_SEQ")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_INTERVAL)
     parser.add_argument("--results-csv", default=os.getenv("ALPHAGENOME_INDIVIDUAL_RESULTS_CSV", DEFAULT_RESULTS_CSV))
@@ -382,11 +478,13 @@ def main() -> None:
     args = parser.parse_args()
 
     client = AlphaGenomeClient(base_url=args.base_url)
-    intervals, variants = build_variant_inputs(
+    base_intervals, base_variants = build_variant_inputs(
         start=args.start,
         window_size=args.window_size,
         num_variants=args.num_individuals,
     )
+    strands = _parse_csv_list(args.strands)
+    intervals, variants = _expand_inputs_by_strand(base_intervals, base_variants, strands)
     ontology_terms = _parse_csv_list(args.ontology_terms)
     requested_outputs = _parse_csv_list(args.requested_outputs)
 
@@ -396,6 +494,8 @@ def main() -> None:
     print(f"gpu_process_pid={args.gpu_process_pid or 'todos'}")
     print(f"window_size={args.window_size}")
     print(f"num_individuals={args.num_individuals}")
+    print(f"strands={','.join(strands)}")
+    print(f"model_inputs={len(variants)}")
     print(f"rounds={args.rounds}")
     print(f"batch_size={args.batch_size}")
     print(f"ontology_terms={','.join(ontology_terms)}")
@@ -409,12 +509,18 @@ def main() -> None:
             ontology_terms=ontology_terms,
             requested_outputs=requested_outputs,
         )
-        client.predict_variants_batch(
+        warmup_batch_response = client.predict_variants_batch(
             intervals=intervals,
             variants=variants,
             ontology_terms=ontology_terms,
             requested_outputs=requested_outputs,
             batch_size=args.batch_size,
+        )
+        _inspect_variant_response_shape(
+            response=warmup_batch_response,
+            requested_outputs=requested_outputs,
+            ontology_terms=ontology_terms,
+            strands=strands,
         )
     except requests.exceptions.HTTPError as e:
         print(f"Erro HTTP no warmup: {e.response.status_code} - {e.response.text}")
@@ -429,6 +535,7 @@ def main() -> None:
         requested_outputs=requested_outputs,
         batch_size=args.batch_size,
         rounds=args.rounds,
+        num_individuals=args.num_individuals,
         gpu_index=args.gpu_index,
         gpu_process_pid=args.gpu_process_pid,
         poll_interval=args.poll_interval,
