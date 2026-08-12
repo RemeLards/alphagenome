@@ -306,6 +306,12 @@ def _result_row(
         "vram_peak_mb": "" if vram_peak_mb is None else f"{vram_peak_mb:.3f}",
         "vram_after_mb": "" if vram_after_mb is None else f"{vram_after_mb:.3f}",
         "vram_peak_delta_mb": "" if peak_delta is None else f"{peak_delta:.3f}",
+        "vram_peak_delta_per_individual_mb": ""
+        if peak_delta is None
+        else f"{peak_delta / num_individuals:.3f}",
+        "vram_peak_delta_per_model_input_mb": ""
+        if peak_delta is None
+        else f"{peak_delta / model_inputs:.3f}",
     }
 
 
@@ -324,6 +330,8 @@ def _write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         "vram_peak_mb",
         "vram_after_mb",
         "vram_peak_delta_mb",
+        "vram_peak_delta_per_individual_mb",
+        "vram_peak_delta_per_model_input_mb",
     ]
     with open(path, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -370,7 +378,8 @@ def _measure_call(
         f"por_individuo={_format_seconds(total_duration / num_individuals)} "
         f"por_input={_format_seconds(total_duration / model_inputs)} "
         f"vram_pico={_format_mb(vram_peak)} "
-        f"delta_pico={_format_mb(float(row['vram_peak_delta_mb']) if row['vram_peak_delta_mb'] else None)}"
+        f"delta_pico={_format_mb(float(row['vram_peak_delta_mb']) if row['vram_peak_delta_mb'] else None)} "
+        f"delta_por_individuo={_format_mb(float(row['vram_peak_delta_per_individual_mb']) if row['vram_peak_delta_per_individual_mb'] else None)}"
     )
     return row
 
@@ -458,9 +467,9 @@ def _print_summary(rows: List[Dict[str, Any]]) -> None:
     print(
         "| modo | rodadas | tempo total medio | tempo medio/individuo | "
         "tempo medio/input | tempo melhor/individuo | VRAM pico media | "
-        "VRAM pico maxima | delta VRAM medio |"
+        "VRAM pico maxima | delta VRAM medio | delta VRAM/individuo | delta VRAM/input |"
     )
-    print("|:---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for mode in ("individual", "batch"):
         mode_rows = [row for row in rows if row["mode"] == mode]
         total_times = _float_values(mode_rows, "total_duration_s")
@@ -468,6 +477,8 @@ def _print_summary(rows: List[Dict[str, Any]]) -> None:
         per_model_input_times = _float_values(mode_rows, "duration_per_model_input_s")
         vram_peaks = _float_values(mode_rows, "vram_peak_mb")
         vram_deltas = _float_values(mode_rows, "vram_peak_delta_mb")
+        vram_deltas_per_individual = _float_values(mode_rows, "vram_peak_delta_per_individual_mb")
+        vram_deltas_per_input = _float_values(mode_rows, "vram_peak_delta_per_model_input_mb")
         print(
             f"| {mode} | {len(mode_rows)} | {_format_seconds(mean(total_times))} | "
             f"{_format_seconds(mean(per_individual_times))} | "
@@ -475,7 +486,9 @@ def _print_summary(rows: List[Dict[str, Any]]) -> None:
             f"{_format_seconds(min(per_individual_times))} | "
             f"{_format_mb(mean(vram_peaks) if vram_peaks else None)} | "
             f"{_format_mb(max(vram_peaks) if vram_peaks else None)} | "
-            f"{_format_mb(mean(vram_deltas) if vram_deltas else None)} |"
+            f"{_format_mb(mean(vram_deltas) if vram_deltas else None)} | "
+            f"{_format_mb(mean(vram_deltas_per_individual) if vram_deltas_per_individual else None)} | "
+            f"{_format_mb(mean(vram_deltas_per_input) if vram_deltas_per_input else None)} |"
         )
 
     individual_mean = mean(
