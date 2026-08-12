@@ -26,8 +26,9 @@ from client import (
 DEFAULT_RESULTS_CSV = "individual_vs_batch_benchmark_results.csv"
 DEFAULT_NUM_INDIVIDUALS = 4
 DEFAULT_BATCH_SIZE = 8
-DEFAULT_STRANDS = "+,-"
-DEFAULT_ONTOLOGY_TERMS = "UBERON:0001157,UBERON:0002107,UBERON:0002048"
+DEFAULT_HAPLOTYPES = "H1,H2"
+DEFAULT_STRANDS = "."
+DEFAULT_ONTOLOGY_TERMS = "CL:1000458,CL:0000346,CL:2000092"
 DEFAULT_POLL_INTERVAL = 0.05
 DEFAULT_ROUNDS = 10
 _NVIDIA_SMI_WARNING_PRINTED = False
@@ -193,74 +194,84 @@ def _inspect_variant_response_shape(
     response: Dict[str, Any],
     requested_outputs: List[str],
     ontology_terms: List[str],
+    haplotypes: List[str],
     strands: List[str],
 ) -> None:
-    expected_tracks = len(ontology_terms) * len(strands)
     variant_outputs = response.get("variant_outputs", [])
     if not variant_outputs:
         print("Checagem de saida: resposta sem variant_outputs")
         return
+    if len(variant_outputs) < len(strands):
+        print(
+            "Checagem de saida: resposta nao tem entradas suficientes para "
+            f"{len(strands)} strands"
+        )
+        return
 
     output_name = requested_outputs[0]
-    first = variant_outputs[0]
+    expected_tracks = len(ontology_terms) * len(strands)
     print("\n--- Checagem de saida ---")
     print(
-        f"esperado se tracks = ontologias x strands: "
-        f"{len(ontology_terms)} x {len(strands)} = {expected_tracks}"
+        f"esperado pelo professor: {len(ontology_terms)} ontologias x "
+        f"{len(haplotypes)} haplotipos = {len(ontology_terms) * len(haplotypes)} canais"
+    )
+    print(
+        f"strands={','.join(strands)}; use +,- apenas se quiser testar orientacao genomica"
     )
     for allele in ("reference", "alternate"):
-        track = first.get(allele, {}).get(output_name)
-        if track is None:
-            print(f"{allele}.{output_name}: ausente")
-            continue
-        values = track.get("values", [])
-        names = track.get("names", [])
-        shape = _nested_shape(values)
-        column_count = shape[-1] if len(shape) >= 2 else len(names)
-        effective_columns = column_count * len(strands)
-        print(
-            f"{allele}.{output_name}: shape={shape} names={len(names)} "
-            f"colunas_por_input={column_count} "
-            f"colunas_por_individuo_com_strands_expandidos={effective_columns}"
-        )
-        if names:
-            print(f"{allele}.{output_name}.names={names}")
-            unique_names = list(dict.fromkeys(names))
-            if len(unique_names) != len(names):
-                print(
-                    f"{allele}.{output_name}: {len(names) - len(unique_names)} "
-                    "tracks duplicados pelo nome"
-                )
-            for term in ontology_terms:
-                term_count = sum(1 for name in names if name.startswith(term))
-                print(f"{allele}.{output_name}: {term} -> {term_count} tracks")
-        if column_count == expected_tracks:
-            print(f"{allele}.{output_name}: OK, tensor parece ser <dimensao grande>:{expected_tracks}")
-        elif effective_columns == expected_tracks:
+        selected_names = []
+        position_count: Optional[int] = None
+        missing = []
+        for haplotype_index, haplotype in enumerate(haplotypes):
+            track = variant_outputs[haplotype_index].get(allele, {}).get(output_name)
+            if track is None:
+                missing.append(f"{haplotype}:output ausente")
+                continue
+            shape = _nested_shape(track.get("values", []))
+            names = track.get("names", [])
+            if shape:
+                position_count = shape[0]
             print(
-                f"{allele}.{output_name}: OK agregado por individuo: "
-                f"{column_count} colunas/input x {len(strands)} strands = {expected_tracks}"
+                f"{allele}.{output_name} haplotype={haplotype}: "
+                f"raw_shape={shape} raw_names={len(names)}"
+            )
+            for term in ontology_terms:
+                matches = [name for name in names if name.startswith(term)]
+                if not matches:
+                    missing.append(f"{haplotype}:{term}")
+                    continue
+                selected_names.append(f"{haplotype}:{matches[0]}")
+        logical_shape = [position_count or 0, len(selected_names)]
+        print(f"{allele}.{output_name}: tensor_logico_shape={logical_shape}")
+        print(f"{allele}.{output_name}: canais_selecionados={selected_names}")
+        expected_haplotype_tracks = len(ontology_terms) * len(haplotypes)
+        if len(selected_names) == expected_haplotype_tracks and not missing:
+            print(
+                f"{allele}.{output_name}: OK, equivale a "
+                f"<dimensao grande>:{expected_haplotype_tracks} apos combinar haplotipos"
             )
         else:
             print(
-                f"{allele}.{output_name}: ATENCAO, colunas nao batem com {expected_tracks}; "
-                "ontologias filtram tracks, mas cada ontologia pode ter varios tracks RNA-seq"
+                f"{allele}.{output_name}: ATENCAO, selecionei {len(selected_names)}/"
+                f"{expected_haplotype_tracks} canais; faltando={missing}"
             )
 
 
-def _expand_inputs_by_strand(
+def _expand_inputs(
     intervals: List[Dict[str, Any]],
     variants: List[Dict[str, Any]],
+    haplotypes: List[str],
     strands: List[str],
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     expanded_intervals = []
     expanded_variants = []
     for interval, variant in zip(intervals, variants, strict=True):
-        for strand in strands:
-            interval_with_strand = dict(interval)
-            interval_with_strand["strand"] = strand
-            expanded_intervals.append(interval_with_strand)
-            expanded_variants.append(dict(variant))
+        for _haplotype in haplotypes:
+            for strand in strands:
+                interval_with_strand = dict(interval)
+                interval_with_strand["strand"] = strand
+                expanded_intervals.append(interval_with_strand)
+                expanded_variants.append(dict(variant))
     return expanded_intervals, expanded_variants
 
 
@@ -269,6 +280,8 @@ def _result_row(
     round_index: int,
     num_individuals: int,
     model_inputs: int,
+    haplotypes: List[str],
+    strands: List[str],
     total_duration_s: float,
     vram_before_mb: Optional[float],
     vram_peak_mb: Optional[float],
@@ -284,6 +297,8 @@ def _result_row(
         "round": round_index,
         "num_individuals": num_individuals,
         "model_inputs": model_inputs,
+        "haplotypes": ";".join(haplotypes),
+        "strands": ";".join(strands),
         "total_duration_s": f"{total_duration_s:.6f}",
         "duration_per_individual_s": f"{total_duration_s / num_individuals:.6f}",
         "duration_per_model_input_s": f"{total_duration_s / model_inputs:.6f}",
@@ -300,6 +315,8 @@ def _write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         "round",
         "num_individuals",
         "model_inputs",
+        "haplotypes",
+        "strands",
         "total_duration_s",
         "duration_per_individual_s",
         "duration_per_model_input_s",
@@ -319,6 +336,8 @@ def _measure_call(
     round_index: int,
     num_individuals: int,
     model_inputs: int,
+    haplotypes: List[str],
+    strands: List[str],
     gpu_index: int,
     gpu_process_pid: Optional[int],
     poll_interval: float,
@@ -338,6 +357,8 @@ def _measure_call(
         round_index=round_index,
         num_individuals=num_individuals,
         model_inputs=model_inputs,
+        haplotypes=haplotypes,
+        strands=strands,
         total_duration_s=total_duration,
         vram_before_mb=vram_before,
         vram_peak_mb=vram_peak,
@@ -363,6 +384,8 @@ def benchmark_individual_vs_batch(
     batch_size: int,
     rounds: int,
     num_individuals: int,
+    haplotypes: List[str],
+    strands: List[str],
     gpu_index: int,
     gpu_process_pid: Optional[int],
     poll_interval: float,
@@ -398,6 +421,8 @@ def benchmark_individual_vs_batch(
                     round_index=round_index,
                     num_individuals=num_individuals,
                     model_inputs=model_inputs,
+                    haplotypes=haplotypes,
+                    strands=strands,
                     gpu_index=gpu_index,
                     gpu_process_pid=gpu_process_pid,
                     poll_interval=poll_interval,
@@ -410,6 +435,8 @@ def benchmark_individual_vs_batch(
                     round_index=round_index,
                     num_individuals=num_individuals,
                     model_inputs=model_inputs,
+                    haplotypes=haplotypes,
+                    strands=strands,
                     gpu_index=gpu_index,
                     gpu_process_pid=gpu_process_pid,
                     poll_interval=poll_interval,
@@ -464,15 +491,20 @@ def main() -> None:
     _load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Compara tempo e VRAM de 8 individuos via individual sequencial vs batch."
+        description="Compara tempo e VRAM usando rna_seq e as ontologias do genes_1000_all_snps_only.yaml."
     )
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--num-individuals", type=int, default=DEFAULT_NUM_INDIVIDUALS)
     parser.add_argument("--batch-size", type=int, default=_env_int("ALPHAGENOME_BATCH_SIZE", DEFAULT_BATCH_SIZE))
     parser.add_argument(
+        "--haplotypes",
+        default=DEFAULT_HAPLOTYPES,
+        help="Haplotipos por individuo, separados por virgula. Default conforme genes_1000_all_snps_only.yaml: H1,H2.",
+    )
+    parser.add_argument(
         "--strands",
         default=DEFAULT_STRANDS,
-        help="Strands por individuo, separados por virgula. Default: +,-.",
+        help="Orientacoes genomicas por haplotipo. Default: .; use +,- apenas se quiser testar orientacao.",
     )
     parser.add_argument("--base-url", default=_default_base_url())
     parser.add_argument("--gpu-index", type=int, default=0, help="Indice da GPU monitorada pelo nvidia-smi.")
@@ -496,8 +528,9 @@ def main() -> None:
         window_size=args.window_size,
         num_variants=args.num_individuals,
     )
+    haplotypes = _parse_csv_list(args.haplotypes)
     strands = _parse_csv_list(args.strands)
-    intervals, variants = _expand_inputs_by_strand(base_intervals, base_variants, strands)
+    intervals, variants = _expand_inputs(base_intervals, base_variants, haplotypes, strands)
     ontology_terms = _parse_csv_list(args.ontology_terms)
     requested_outputs = _parse_csv_list(args.requested_outputs)
 
@@ -507,6 +540,7 @@ def main() -> None:
     print(f"gpu_process_pid={args.gpu_process_pid or 'todos'}")
     print(f"window_size={args.window_size}")
     print(f"num_individuals={args.num_individuals}")
+    print(f"haplotypes={','.join(haplotypes)}")
     print(f"strands={','.join(strands)}")
     print(f"model_inputs={len(variants)}")
     print(f"rounds={args.rounds}")
@@ -533,6 +567,7 @@ def main() -> None:
             response=warmup_batch_response,
             requested_outputs=requested_outputs,
             ontology_terms=ontology_terms,
+            haplotypes=haplotypes,
             strands=strands,
         )
     except requests.exceptions.HTTPError as e:
@@ -551,6 +586,8 @@ def main() -> None:
             batch_size=args.batch_size,
             rounds=args.rounds,
             num_individuals=args.num_individuals,
+            haplotypes=haplotypes,
+            strands=strands,
             gpu_index=args.gpu_index,
             gpu_process_pid=args.gpu_process_pid,
             poll_interval=args.poll_interval,
